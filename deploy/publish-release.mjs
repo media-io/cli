@@ -329,6 +329,68 @@ async function releaseForTag(apiBase, githubTag, githubToken) {
   return releases.find((release) => release.tag_name === githubTag) ?? null;
 }
 
+// Draft Release 在某些 GitHub Token/API 组合下不能可靠地通过 tag 或列表再次查询。
+// 因此创建阶段把 GitHub 返回的 Release ID 保存到当前发布 Job 的工作区，后续阶段
+// 直接使用该 ID。该文件不包含任何密钥，也不属于发布产物。
+function githubReleaseStatePath() {
+  const cliArtifactDirectory = resolve(requiredEnv("CLI_ARTIFACT_DIR"));
+  if (!existsSync(cliArtifactDirectory)) {
+    fail(`CLI_ARTIFACT_DIR 不存在：${cliArtifactDirectory}`);
+  }
+  return join(cliArtifactDirectory, "github-release-state.json");
+}
+
+function writeGithubReleaseState(release, githubRepository, githubTag, releaseVersion, cliCommit) {
+  if (!release?.id) fail("GitHub Draft Release 未返回 release.id");
+  const statePath = githubReleaseStatePath();
+  const state = {
+    schema_version: 1,
+    github_repository: githubRepository,
+    github_tag: githubTag,
+    release_version: releaseVersion,
+    cli_commit: cliCommit,
+    release_id: release.id,
+  };
+  writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  console.log(`[publish] draft release state saved: ${statePath}`);
+  return state;
+}
+
+function readGithubReleaseState(githubRepository, githubTag, releaseVersion, cliCommit, options = {}) {
+  const statePath = githubReleaseStatePath();
+  if (!existsSync(statePath)) {
+    if (options.allowMissing) return null;
+    fail(`缺少 Draft Release 状态文件：${statePath}；请先执行“创建 GitHub tag/Draft Release”步骤`);
+  }
+  const state = readJson(statePath);
+  if (
+    state.schema_version !== 1
+    || state.github_repository !== githubRepository
+    || state.github_tag !== githubTag
+    || state.release_version !== releaseVersion
+    || state.cli_commit !== cliCommit
+    || !state.release_id
+  ) {
+    if (options.allowMissing) return null;
+    fail(`Draft Release 状态文件与当前发布不匹配：${statePath}`);
+  }
+  return state;
+}
+
+async function releaseFromState(apiBase, githubToken, state, options = {}) {
+  const release = await githubRequest(`${apiBase}/releases/${encodeURIComponent(state.release_id)}`, githubToken, {
+    allowNotFound: true,
+  });
+  if (!release) {
+    if (options.allowMissing) return null;
+    fail(`保存的 GitHub Draft Release ID 已不存在：${state.release_id}；请从“创建 GitHub tag/Draft Release”步骤重新执行`);
+  }
+  if (release.tag_name !== state.github_tag) {
+    fail(`GitHub Release ID ${state.release_id} 的 tag 与状态文件不一致`);
+  }
+  return release;
+}
+
 async function ensureDraftRelease(apiBase, githubTag, cliCommit, releaseVersion, githubToken) {
   let release = await releaseForTag(apiBase, githubTag, githubToken);
   if (!release) {
@@ -518,18 +580,32 @@ try {
     const gitAuth = configureGithubRemote(githubToken, githubRepository);
     assertSourceAlreadySynced(gitAuth, source.cliCommit, githubBranch);
     ensureGithubTag(gitAuth, githubTag, source.cliCommit);
-    await ensureDraftRelease(apiBase, githubTag, source.cliCommit, releaseVersion, githubToken);
+    const storedState = readGithubReleaseState(
+      githubRepository,
+      githubTag,
+      releaseVersion,
+      source.cliCommit,
+      { allowMissing: true },
+    );
+    let release = storedState
+      ? await releaseFromState(apiBase, githubToken, storedState, { allowMissing: true })
+      : null;
+    if (!release) {
+      release = await ensureDraftRelease(apiBase, githubTag, source.cliCommit, releaseVersion, githubToken);
+    }
+    if (!release.draft) fail(`GitHub Release ${githubTag} 已公开；不能创建或改写 Draft Release`);
+    writeGithubReleaseState(release, githubRepository, githubTag, releaseVersion, source.cliCommit);
   } else if (operation === "upload-binary") {
     const githubToken = requiredEnv("GITHUB_TOKEN");
     const artifacts = verifiedArtifacts(releaseVersion, source.cliCommit);
-    const release = await releaseForTag(apiBase, githubTag, githubToken);
-    if (!release) fail(`找不到 GitHub Draft Release：${githubTag}`);
+    const state = readGithubReleaseState(githubRepository, githubTag, releaseVersion, source.cliCommit);
+    const release = await releaseFromState(apiBase, githubToken, state);
     const manifestPath = createReleaseManifest(releaseVersion, githubTag, source.cliCommit, artifacts);
     await uploadBinaryAssets(release, apiBase, githubRepository, githubToken, artifacts, manifestPath);
   } else if (operation === "publish-github-release") {
     const githubToken = requiredEnv("GITHUB_TOKEN");
-    const release = await releaseForTag(apiBase, githubTag, githubToken);
-    if (!release) fail(`找不到 GitHub Draft Release：${githubTag}`);
+    const state = readGithubReleaseState(githubRepository, githubTag, releaseVersion, source.cliCommit);
+    const release = await releaseFromState(apiBase, githubToken, state);
     await publishGithubRelease(release, apiBase, githubToken, binaryArchiveNames(releaseVersion));
   } else if (operation === "publish-npm") {
     const githubToken = requiredEnv("GITHUB_TOKEN");
