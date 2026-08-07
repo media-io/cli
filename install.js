@@ -21,8 +21,8 @@ if (!platform || !arch) {
   process.exit(1);
 }
 
-const binName = platform === "windows" ? "mi.exe" : "mi";
-const tarball = `mi_${VERSION}_${platform}_${arch}.tar.gz`;
+const binName = platform === "windows" ? "mediaio.exe" : "mediaio";
+const tarball = `mediaio_${VERSION}_${platform}_${arch}.tar.gz`;
 const url = `https://github.com/media-io/cli/releases/download/v${VERSION}/${tarball}`;
 
 const vendorDir = path.join(__dirname, "vendor");

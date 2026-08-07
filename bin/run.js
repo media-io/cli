@@ -19,7 +19,7 @@ function readInstallMetadata(vendorDir) {
 }
 
 module.exports = function run() {
-  const binName = process.platform === "win32" ? "mi.exe" : "mi";
+  const binName = process.platform === "win32" ? "mediaio.exe" : "mediaio";
   const vendorDir = path.join(__dirname, "..", "vendor");
   const bin = path.join(vendorDir, binName);
   if (!fs.existsSync(bin)) {
