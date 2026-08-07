@@ -1,6 +1,15 @@
 #!/usr/bin/env node
 /**
- * 在公司内部流水线中同步 CLI 源码、创建 GitHub Release、发布 npm 并冒烟验证。
+ * 在公司内部流水线中分阶段发布 @mediaio/cli。
+ *
+ * 用法：
+ *   node deploy/publish-release.mjs sync-source
+ *   node deploy/publish-release.mjs create-draft-release
+ *   node deploy/publish-release.mjs upload-binary
+ *   node deploy/publish-release.mjs publish-github-release
+ *   node deploy/publish-release.mjs publish-npm
+ *   node deploy/publish-release.mjs all
+ *
  * 不依赖 gh、jq 或 GitHub Actions；只依赖 Node.js、Git 与 npm。
  */
 
@@ -19,6 +28,15 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
 const packageRoot = resolve(new URL("..", import.meta.url).pathname);
+const packageName = "@mediaio/cli";
+const allowedOperations = new Set([
+  "sync-source",
+  "create-draft-release",
+  "upload-binary",
+  "publish-github-release",
+  "publish-npm",
+  "all",
+]);
 
 function fail(message) {
   throw new Error(message);
@@ -85,6 +103,17 @@ function findOnlyTarball(directory) {
   return tarballs[0];
 }
 
+function parseChecksums(file) {
+  const result = new Map();
+  for (const line of readFileSync(file, "utf8").trim().split("\n")) {
+    if (!line.trim()) continue;
+    const [checksum, name] = line.trim().split(/\s+/);
+    if (!checksum || !name) fail(`checksums.txt 格式错误：${line}`);
+    result.set(name, checksum);
+  }
+  return result;
+}
+
 function createGitAskPass(token) {
   const directory = mkdtempSync(join(tmpdir(), "mediaio-github-askpass-"));
   const script = join(directory, "askpass.sh");
@@ -123,38 +152,10 @@ async function githubRequest(url, token, options = {}) {
   return body ? JSON.parse(body) : {};
 }
 
-function parseChecksums(file) {
-  const result = new Map();
-  for (const line of readFileSync(file, "utf8").trim().split("\n")) {
-    if (!line.trim()) continue;
-    const [checksum, name] = line.trim().split(/\s+/);
-    if (!checksum || !name) fail(`checksums.txt 格式错误：${line}`);
-    result.set(name, checksum);
-  }
-  return result;
-}
-
-const releaseVersion = requiredEnv("RELEASE_VERSION");
-assertSemVer(releaseVersion);
-const githubToken = requiredEnv("GITHUB_TOKEN");
-const npmToken = requiredEnv("NODE_AUTH_TOKEN");
-const binArtifactDirectory = resolve(requiredEnv("BIN_ARTIFACT_DIR"));
-const cliArtifactDirectory = resolve(requiredEnv("CLI_ARTIFACT_DIR"));
-const githubRepository = process.env.GITHUB_REPOSITORY ?? "media-io/cli";
-const githubBranch = process.env.GITHUB_BRANCH ?? "main";
-const npmDistTag = process.env.NPM_DIST_TAG ?? "latest";
-const githubTag = `v${releaseVersion}`;
-const packageName = "@mediaio/cli";
-
-let temporaryDirectory = "";
-let askPassDirectory = "";
-
-try {
-  for (const command of ["git", "npm", "node"]) {
+function sourceContext(releaseVersion) {
+  for (const command of ["git", "node"]) {
     if (!tryRun(command, ["--version"]).ok) fail(`缺少命令：${command}`);
   }
-  if (!existsSync(binArtifactDirectory)) fail(`BIN_ARTIFACT_DIR 不存在：${binArtifactDirectory}`);
-  if (!existsSync(cliArtifactDirectory)) fail(`CLI_ARTIFACT_DIR 不存在：${cliArtifactDirectory}`);
 
   const pkg = readJson(join(packageRoot, "package.json"));
   if (pkg.name !== packageName) fail(`正式发布包名必须是 ${packageName}，当前为：${pkg.name}`);
@@ -166,6 +167,29 @@ try {
   if (run("git", ["rev-parse", "--is-shallow-repository"]) === "true") {
     fail("CLI checkout 为 shallow repository；请在代码拉取插件中启用完整历史后再发布");
   }
+  if (process.env.CLI_RELEASE_COMMIT && process.env.CLI_RELEASE_COMMIT !== cliCommit) {
+    fail("当前 CLI checkout 与 CLI_RELEASE_COMMIT 不一致");
+  }
+  return { cliCommit };
+}
+
+function binaryArchiveNames(releaseVersion) {
+  const targets = [
+    ["darwin", "amd64"],
+    ["darwin", "arm64"],
+    ["linux", "amd64"],
+    ["linux", "arm64"],
+    ["windows", "amd64"],
+    ["windows", "arm64"],
+  ];
+  return targets.map(([os, arch]) => `mediaio_${releaseVersion}_${os}_${arch}.tar.gz`);
+}
+
+function verifiedArtifacts(releaseVersion, cliCommit) {
+  const binArtifactDirectory = resolve(requiredEnv("BIN_ARTIFACT_DIR"));
+  const cliArtifactDirectory = resolve(requiredEnv("CLI_ARTIFACT_DIR"));
+  if (!existsSync(binArtifactDirectory)) fail(`BIN_ARTIFACT_DIR 不存在：${binArtifactDirectory}`);
+  if (!existsSync(cliArtifactDirectory)) fail(`CLI_ARTIFACT_DIR 不存在：${cliArtifactDirectory}`);
 
   const binBuild = readJson(join(binArtifactDirectory, "bin-build.json"));
   const cliBuild = readJson(join(cliArtifactDirectory, "cli-build.json"));
@@ -180,15 +204,7 @@ try {
     fail("npm tarball 的 SHA-256 与 cli-build.json 不一致");
   }
 
-  const targets = [
-    ["darwin", "amd64"],
-    ["darwin", "arm64"],
-    ["linux", "amd64"],
-    ["linux", "arm64"],
-    ["windows", "amd64"],
-    ["windows", "arm64"],
-  ];
-  const archiveNames = targets.map(([os, arch]) => `mediaio_${releaseVersion}_${os}_${arch}.tar.gz`);
+  const archiveNames = binaryArchiveNames(releaseVersion);
   const checksumsPath = join(binArtifactDirectory, "checksums.txt");
   const checksums = parseChecksums(checksumsPath);
   for (const name of archiveNames) {
@@ -197,31 +213,35 @@ try {
     if (checksums.get(name) !== sha256(file)) fail(`checksums.txt 与 ${name} 不一致`);
   }
 
-  temporaryDirectory = mkdtempSync(join(tmpdir(), "mediaio-release-"));
-  const releaseManifestPath = join(temporaryDirectory, "release-manifest.json");
-  const releaseManifest = {
-    schema_version: 1,
-    release_version: releaseVersion,
-    github_tag: githubTag,
-    cli: {
-      commit: cliCommit,
-      package: packageName,
-      tarball_name: basename(cliTarball),
-      tarball_sha256: sha256(cliTarball),
-    },
-    bin: {
-      commit: binBuild.bin_commit,
-      go_version: binBuild.go_version,
-    },
-    assets: archiveNames.map((name) => ({ name, sha256: checksums.get(name) })),
+  return {
+    archiveNames,
+    binArtifactDirectory,
+    binBuild,
+    checksums,
+    checksumsPath,
+    cliBuild,
+    cliTarball,
   };
-  writeFileSync(releaseManifestPath, `${JSON.stringify(releaseManifest, null, 2)}\n`);
+}
 
-  console.log(`[publish] release: ${releaseVersion}`);
-  console.log(`[publish] CLI commit: ${cliCommit}`);
-  console.log(`[publish] BIN commit: ${binBuild.bin_commit}`);
+function verifiedCliArtifact(releaseVersion, cliCommit) {
+  const cliArtifactDirectory = resolve(requiredEnv("CLI_ARTIFACT_DIR"));
+  if (!existsSync(cliArtifactDirectory)) fail(`CLI_ARTIFACT_DIR 不存在：${cliArtifactDirectory}`);
 
-  // 源码镜像仅允许 fast-forward，禁止对公开仓库执行 force push。
+  const cliBuild = readJson(join(cliArtifactDirectory, "cli-build.json"));
+  const cliTarball = findOnlyTarball(cliArtifactDirectory);
+  if (cliBuild.release_version !== releaseVersion) fail("cli-build.json 的版本不匹配");
+  if (cliBuild.package_name !== packageName) fail("cli-build.json 的包名不匹配");
+  if (cliBuild.cli_commit !== cliCommit) {
+    fail("当前 CLI checkout 与已验证 npm tarball 的源提交不一致");
+  }
+  if (cliBuild.tarball_sha256 !== sha256(cliTarball)) {
+    fail("npm tarball 的 SHA-256 与 cli-build.json 不一致");
+  }
+  return { cliBuild, cliTarball };
+}
+
+function configureGithubRemote(githubToken, githubRepository) {
   const gitAuth = createGitAskPass(githubToken);
   askPassDirectory = gitAuth.directory;
   const remoteName = "github-publish";
@@ -231,26 +251,49 @@ try {
   } else {
     run("git", ["remote", "add", remoteName, remoteUrl], { env: gitAuth.env });
   }
-  run("git", ["fetch", "--no-tags", remoteName, githubBranch], { env: gitAuth.env });
-  if (!tryRun("git", ["merge-base", "--is-ancestor", `${remoteName}/${githubBranch}`, cliCommit], { env: gitAuth.env }).ok) {
+  return { ...gitAuth, remoteName };
+}
+
+function syncSource(gitAuth, cliCommit, githubBranch) {
+  run("git", ["fetch", "--no-tags", gitAuth.remoteName, githubBranch], { env: gitAuth.env });
+  if (!tryRun("git", ["merge-base", "--is-ancestor", `${gitAuth.remoteName}/${githubBranch}`, cliCommit], { env: gitAuth.env }).ok) {
     fail(`GitHub ${githubBranch} 不是当前 CLI 提交的祖先；请先人工完成镜像基线对齐，不能 force push`);
   }
-  run("git", ["push", remoteName, `${cliCommit}:refs/heads/${githubBranch}`], { env: gitAuth.env });
+  run("git", ["push", gitAuth.remoteName, `${cliCommit}:refs/heads/${githubBranch}`], { env: gitAuth.env });
+  console.log(`[publish] source synced: ${githubBranch} -> ${cliCommit}`);
+}
 
-  const dereferencedTag = run("git", ["ls-remote", remoteName, `refs/tags/${githubTag}^{}`], { env: gitAuth.env });
-  const lightweightTag = run("git", ["ls-remote", remoteName, `refs/tags/${githubTag}`], { env: gitAuth.env });
+function assertSourceAlreadySynced(gitAuth, cliCommit, githubBranch) {
+  run("git", ["fetch", "--no-tags", gitAuth.remoteName, githubBranch], { env: gitAuth.env });
+  if (!tryRun("git", ["merge-base", "--is-ancestor", cliCommit, `${gitAuth.remoteName}/${githubBranch}`], { env: gitAuth.env }).ok) {
+    fail(`GitHub ${githubBranch} 尚未包含当前 CLI 提交；请先执行“同步 CLI 源码到 GitHub”`);
+  }
+}
+
+function ensureGithubTag(gitAuth, githubTag, cliCommit) {
+  const dereferencedTag = run("git", ["ls-remote", gitAuth.remoteName, `refs/tags/${githubTag}^{}`], { env: gitAuth.env });
+  const lightweightTag = run("git", ["ls-remote", gitAuth.remoteName, `refs/tags/${githubTag}`], { env: gitAuth.env });
   const existingTagCommit = (dereferencedTag || lightweightTag).split(/\s+/)[0];
   if (existingTagCommit) {
     if (existingTagCommit !== cliCommit) {
       fail(`GitHub tag ${githubTag} 已存在但未指向当前 CLI 提交`);
     }
-  } else {
-    run("git", ["tag", "-a", githubTag, cliCommit, "-m", `Release ${githubTag}`], { env: gitAuth.env });
-    run("git", ["push", remoteName, `refs/tags/${githubTag}`], { env: gitAuth.env });
+    console.log(`[publish] tag already present: ${githubTag}`);
+    return;
   }
+  run("git", ["config", "user.name", process.env.GIT_TAGGER_NAME ?? "mediaio-release-bot"], { env: gitAuth.env });
+  run("git", ["config", "user.email", process.env.GIT_TAGGER_EMAIL ?? "mediaio-release-bot@users.noreply.github.com"], { env: gitAuth.env });
+  run("git", ["tag", "-a", githubTag, cliCommit, "-m", `Release ${githubTag}`], { env: gitAuth.env });
+  run("git", ["push", gitAuth.remoteName, `refs/tags/${githubTag}`], { env: gitAuth.env });
+  console.log(`[publish] tag created: ${githubTag}`);
+}
 
-  const apiBase = `https://api.github.com/repos/${githubRepository}`;
-  let release = await githubRequest(`${apiBase}/releases/tags/${encodeURIComponent(githubTag)}`, githubToken, { allowNotFound: true });
+async function releaseForTag(apiBase, githubTag, githubToken) {
+  return githubRequest(`${apiBase}/releases/tags/${encodeURIComponent(githubTag)}`, githubToken, { allowNotFound: true });
+}
+
+async function ensureDraftRelease(apiBase, githubTag, cliCommit, releaseVersion, githubToken) {
+  let release = await releaseForTag(apiBase, githubTag, githubToken);
   if (!release) {
     release = await githubRequest(`${apiBase}/releases`, githubToken, {
       method: "POST",
@@ -264,12 +307,49 @@ try {
         generate_release_notes: false,
       }),
     });
+    console.log(`[publish] draft release created: ${githubTag}`);
+  } else if (!release.draft) {
+    fail(`GitHub Release ${githubTag} 已公开；不能创建或改写 Draft Release`);
+  } else {
+    console.log(`[publish] draft release already present: ${githubTag}`);
   }
+  return release;
+}
+
+function createReleaseManifest(releaseVersion, githubTag, cliCommit, artifacts) {
+  temporaryDirectory = mkdtempSync(join(tmpdir(), "mediaio-release-"));
+  const releaseManifestPath = join(temporaryDirectory, "release-manifest.json");
+  const releaseManifest = {
+    schema_version: 1,
+    release_version: releaseVersion,
+    github_tag: githubTag,
+    cli: {
+      commit: cliCommit,
+      package: packageName,
+      tarball_name: basename(artifacts.cliTarball),
+      tarball_sha256: sha256(artifacts.cliTarball),
+    },
+    bin: {
+      commit: artifacts.binBuild.bin_commit,
+      go_version: artifacts.binBuild.go_version,
+    },
+    assets: artifacts.archiveNames.map((name) => ({ name, sha256: artifacts.checksums.get(name) })),
+  };
+  writeFileSync(releaseManifestPath, `${JSON.stringify(releaseManifest, null, 2)}\n`);
+  return releaseManifestPath;
+}
+
+function releaseAssetNames(archiveNames) {
+  return [...archiveNames, "checksums.txt", "release-manifest.json"];
+}
+
+async function uploadBinaryAssets(release, apiBase, githubRepository, githubToken, artifacts, manifestPath) {
+  if (!release.draft) fail("GitHub Release 已公开，拒绝继续上传或覆盖 Asset");
 
   const uploadFiles = [
-    ...archiveNames.map((name) => join(binArtifactDirectory, name)),
-    checksumsPath,
-    releaseManifestPath,
+    ...artifacts.archiveNames.map((name) => join(artifacts.binArtifactDirectory, name)),
+    artifacts.checksumsPath,
+    manifestPath,
   ];
   const existingAssets = new Map(release.assets.map((asset) => [asset.name, asset]));
   for (const file of uploadFiles) {
@@ -291,20 +371,45 @@ try {
     console.log(`[publish] uploaded: ${name}`);
   }
 
-  release = await githubRequest(`${apiBase}/releases/${release.id}`, githubToken);
-  const uploadedNames = new Set(release.assets.map((asset) => asset.name));
-  for (const file of uploadFiles) {
-    if (!uploadedNames.has(basename(file))) fail(`GitHub Release 缺少已上传资产：${basename(file)}`);
+  const refreshedRelease = await githubRequest(`${apiBase}/releases/${release.id}`, githubToken);
+  const uploadedNames = new Set(refreshedRelease.assets.map((asset) => asset.name));
+  for (const name of releaseAssetNames(artifacts.archiveNames)) {
+    if (!uploadedNames.has(name)) fail(`GitHub Release 缺少已上传资产：${name}`);
   }
-  if (release.draft) {
-    release = await githubRequest(`${apiBase}/releases/${release.id}`, githubToken, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ draft: false }),
-    });
-  }
-  if (release.draft) fail("GitHub Release 未成功公开，禁止继续 npm 发布");
+  console.log(`[publish] binary assets verified: ${release.tag_name}`);
+  return refreshedRelease;
+}
 
+async function publishGithubRelease(release, apiBase, githubToken, archiveNames) {
+  const uploadedNames = new Set(release.assets.map((asset) => asset.name));
+  for (const name of releaseAssetNames(archiveNames)) {
+    if (!uploadedNames.has(name)) fail(`GitHub Release 缺少资产：${name}`);
+  }
+  if (!release.draft) {
+    console.log(`[publish] GitHub Release already public: ${release.tag_name}`);
+    return release;
+  }
+  const publicRelease = await githubRequest(`${apiBase}/releases/${release.id}`, githubToken, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ draft: false }),
+  });
+  if (publicRelease.draft) fail("GitHub Release 未成功公开");
+  console.log(`[publish] GitHub Release published: ${publicRelease.tag_name}`);
+  return publicRelease;
+}
+
+async function publishNpm(releaseVersion, githubTag, apiBase, githubToken, cliTarball) {
+  const release = await releaseForTag(apiBase, githubTag, githubToken);
+  if (!release || release.draft) fail("GitHub Release 尚未公开，禁止发布 npm");
+  const uploadedNames = new Set(release.assets.map((asset) => asset.name));
+  for (const name of releaseAssetNames(binaryArchiveNames(releaseVersion))) {
+    if (!uploadedNames.has(name)) fail(`已公开的 GitHub Release 缺少资产：${name}`);
+  }
+
+  if (!tryRun("npm", ["--version"]).ok) fail("缺少命令：npm");
+  const npmToken = requiredEnv("NODE_AUTH_TOKEN");
+  const npmDistTag = process.env.NPM_DIST_TAG ?? "latest";
   const npmDirectory = mkdtempSync(join(tmpdir(), "mediaio-npmrc-"));
   const npmrcPath = join(npmDirectory, ".npmrc");
   writeFileSync(npmrcPath, `//registry.npmjs.org/:_authToken=${npmToken}\n`, { mode: 0o600 });
@@ -330,8 +435,77 @@ try {
   } finally {
     rmSync(npmDirectory, { recursive: true, force: true });
   }
+  console.log(`[publish] npm published and verified: ${packageName}@${releaseVersion}`);
+}
 
-  console.log(`[publish] completed: ${packageName}@${releaseVersion}`);
+function printUsage() {
+  console.log("用法：node deploy/publish-release.mjs <sync-source|create-draft-release|upload-binary|publish-github-release|publish-npm|all>");
+}
+
+const operation = process.argv[2] ?? "all";
+if (operation === "--help" || operation === "-h") {
+  printUsage();
+  process.exit(0);
+}
+if (process.argv.length > 3 || !allowedOperations.has(operation)) {
+  printUsage();
+  fail(`不支持的发布阶段：${operation}`);
+}
+
+const releaseVersion = requiredEnv("RELEASE_VERSION");
+assertSemVer(releaseVersion);
+const githubRepository = process.env.GITHUB_REPOSITORY ?? "media-io/cli";
+const githubBranch = process.env.GITHUB_BRANCH ?? "main";
+const githubTag = `v${releaseVersion}`;
+const apiBase = `https://api.github.com/repos/${githubRepository}`;
+
+let temporaryDirectory = "";
+let askPassDirectory = "";
+
+try {
+  const source = sourceContext(releaseVersion);
+  console.log(`[publish] phase: ${operation}`);
+  console.log(`[publish] release: ${releaseVersion}`);
+  console.log(`[publish] CLI commit: ${source.cliCommit}`);
+
+  if (operation === "sync-source") {
+    const githubToken = requiredEnv("GITHUB_TOKEN");
+    const gitAuth = configureGithubRemote(githubToken, githubRepository);
+    syncSource(gitAuth, source.cliCommit, githubBranch);
+  } else if (operation === "create-draft-release") {
+    const githubToken = requiredEnv("GITHUB_TOKEN");
+    const gitAuth = configureGithubRemote(githubToken, githubRepository);
+    assertSourceAlreadySynced(gitAuth, source.cliCommit, githubBranch);
+    ensureGithubTag(gitAuth, githubTag, source.cliCommit);
+    await ensureDraftRelease(apiBase, githubTag, source.cliCommit, releaseVersion, githubToken);
+  } else if (operation === "upload-binary") {
+    const githubToken = requiredEnv("GITHUB_TOKEN");
+    const artifacts = verifiedArtifacts(releaseVersion, source.cliCommit);
+    const release = await releaseForTag(apiBase, githubTag, githubToken);
+    if (!release) fail(`找不到 GitHub Draft Release：${githubTag}`);
+    const manifestPath = createReleaseManifest(releaseVersion, githubTag, source.cliCommit, artifacts);
+    await uploadBinaryAssets(release, apiBase, githubRepository, githubToken, artifacts, manifestPath);
+  } else if (operation === "publish-github-release") {
+    const githubToken = requiredEnv("GITHUB_TOKEN");
+    const release = await releaseForTag(apiBase, githubTag, githubToken);
+    if (!release) fail(`找不到 GitHub Draft Release：${githubTag}`);
+    await publishGithubRelease(release, apiBase, githubToken, binaryArchiveNames(releaseVersion));
+  } else if (operation === "publish-npm") {
+    const githubToken = requiredEnv("GITHUB_TOKEN");
+    const cliArtifact = verifiedCliArtifact(releaseVersion, source.cliCommit);
+    await publishNpm(releaseVersion, githubTag, apiBase, githubToken, cliArtifact.cliTarball);
+  } else {
+    const githubToken = requiredEnv("GITHUB_TOKEN");
+    const artifacts = verifiedArtifacts(releaseVersion, source.cliCommit);
+    const gitAuth = configureGithubRemote(githubToken, githubRepository);
+    syncSource(gitAuth, source.cliCommit, githubBranch);
+    ensureGithubTag(gitAuth, githubTag, source.cliCommit);
+    let release = await ensureDraftRelease(apiBase, githubTag, source.cliCommit, releaseVersion, githubToken);
+    const manifestPath = createReleaseManifest(releaseVersion, githubTag, source.cliCommit, artifacts);
+    release = await uploadBinaryAssets(release, apiBase, githubRepository, githubToken, artifacts, manifestPath);
+    await publishGithubRelease(release, apiBase, githubToken, artifacts.archiveNames);
+    await publishNpm(releaseVersion, githubTag, apiBase, githubToken, artifacts.cliTarball);
+  }
 } finally {
   if (temporaryDirectory) rmSync(temporaryDirectory, { recursive: true, force: true });
   if (askPassDirectory) rmSync(askPassDirectory, { recursive: true, force: true });
