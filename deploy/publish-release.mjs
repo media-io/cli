@@ -20,7 +20,6 @@ import {
   existsSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -93,16 +92,6 @@ function readJson(file) {
   } catch (error) {
     fail(`无法读取 JSON 文件 ${file}：${error.message}`);
   }
-}
-
-function findOnlyTarball(directory) {
-  const tarballs = readdirSync(directory)
-    .filter((name) => name.endsWith(".tgz"))
-    .map((name) => join(directory, name));
-  if (tarballs.length !== 1) {
-    fail(`CLI_ARTIFACT_DIR 中必须恰好有一个 .tgz 文件，实际为 ${tarballs.length} 个`);
-  }
-  return tarballs[0];
 }
 
 function parseChecksums(file) {
@@ -187,24 +176,12 @@ function binaryArchiveNames(releaseVersion) {
   return targets.map(([os, arch]) => `mediaio_${releaseVersion}_${os}_${arch}.tar.gz`);
 }
 
-function verifiedArtifacts(releaseVersion, cliCommit) {
+function verifiedArtifacts(releaseVersion) {
   const binArtifactDirectory = resolve(requiredEnv("BIN_ARTIFACT_DIR"));
-  const cliArtifactDirectory = resolve(requiredEnv("CLI_ARTIFACT_DIR"));
   if (!existsSync(binArtifactDirectory)) fail(`BIN_ARTIFACT_DIR 不存在：${binArtifactDirectory}`);
-  if (!existsSync(cliArtifactDirectory)) fail(`CLI_ARTIFACT_DIR 不存在：${cliArtifactDirectory}`);
 
   const binBuild = readJson(join(binArtifactDirectory, "bin-build.json"));
-  const cliBuild = readJson(join(cliArtifactDirectory, "cli-build.json"));
-  const cliTarball = findOnlyTarball(cliArtifactDirectory);
   if (binBuild.release_version !== releaseVersion) fail("bin-build.json 的版本不匹配");
-  if (cliBuild.release_version !== releaseVersion) fail("cli-build.json 的版本不匹配");
-  if (cliBuild.package_name !== packageName) fail("cli-build.json 的包名不匹配");
-  if (cliBuild.cli_commit !== cliCommit) {
-    fail("当前 CLI checkout 与已验证 npm tarball 的源提交不一致");
-  }
-  if (cliBuild.tarball_sha256 !== sha256(cliTarball)) {
-    fail("npm tarball 的 SHA-256 与 cli-build.json 不一致");
-  }
 
   const archiveNames = binaryArchiveNames(releaseVersion);
   const checksumsPath = join(binArtifactDirectory, "checksums.txt");
@@ -221,26 +198,7 @@ function verifiedArtifacts(releaseVersion, cliCommit) {
     binBuild,
     checksums,
     checksumsPath,
-    cliBuild,
-    cliTarball,
   };
-}
-
-function verifiedCliArtifact(releaseVersion, cliCommit) {
-  const cliArtifactDirectory = resolve(requiredEnv("CLI_ARTIFACT_DIR"));
-  if (!existsSync(cliArtifactDirectory)) fail(`CLI_ARTIFACT_DIR 不存在：${cliArtifactDirectory}`);
-
-  const cliBuild = readJson(join(cliArtifactDirectory, "cli-build.json"));
-  const cliTarball = findOnlyTarball(cliArtifactDirectory);
-  if (cliBuild.release_version !== releaseVersion) fail("cli-build.json 的版本不匹配");
-  if (cliBuild.package_name !== packageName) fail("cli-build.json 的包名不匹配");
-  if (cliBuild.cli_commit !== cliCommit) {
-    fail("当前 CLI checkout 与已验证 npm tarball 的源提交不一致");
-  }
-  if (cliBuild.tarball_sha256 !== sha256(cliTarball)) {
-    fail("npm tarball 的 SHA-256 与 cli-build.json 不一致");
-  }
-  return { cliBuild, cliTarball };
 }
 
 function configureGithubRemote(githubToken, githubRepository) {
@@ -333,11 +291,11 @@ async function releaseForTag(apiBase, githubTag, githubToken) {
 // 因此创建阶段把 GitHub 返回的 Release ID 保存到当前发布 Job 的工作区，后续阶段
 // 直接使用该 ID。该文件不包含任何密钥，也不属于发布产物。
 function githubReleaseStatePath() {
-  const cliArtifactDirectory = resolve(requiredEnv("CLI_ARTIFACT_DIR"));
-  if (!existsSync(cliArtifactDirectory)) {
-    fail(`CLI_ARTIFACT_DIR 不存在：${cliArtifactDirectory}`);
+  const stateDirectory = resolve(process.env.WORKSPACE ?? packageRoot);
+  if (!existsSync(stateDirectory)) {
+    fail(`GitHub Release 状态目录不存在：${stateDirectory}`);
   }
-  return join(cliArtifactDirectory, "github-release-state.json");
+  return join(stateDirectory, ".mediaio-github-release-state.json");
 }
 
 function writeGithubReleaseState(release, githubRepository, githubTag, releaseVersion, cliCommit) {
@@ -435,8 +393,6 @@ function createReleaseManifest(releaseVersion, githubTag, cliCommit, artifacts) 
     cli: {
       commit: cliCommit,
       package: packageName,
-      tarball_name: basename(artifacts.cliTarball),
-      tarball_sha256: sha256(artifacts.cliTarball),
     },
     bin: {
       commit: artifacts.binBuild.bin_commit,
@@ -508,7 +464,7 @@ async function publishGithubRelease(release, apiBase, githubToken, archiveNames)
   return publicRelease;
 }
 
-async function publishNpm(releaseVersion, githubTag, apiBase, githubToken, cliTarball) {
+async function publishNpm(releaseVersion, githubTag, apiBase, githubToken) {
   const release = await releaseForTag(apiBase, githubTag, githubToken);
   if (!release || release.draft) fail("GitHub Release 尚未公开，禁止发布 npm");
   const uploadedNames = new Set(release.assets.map((asset) => asset.name));
@@ -531,13 +487,14 @@ async function publishNpm(releaseVersion, githubTag, apiBase, githubToken, cliTa
       }
       console.log(`[publish] npm version already present: ${packageName}@${releaseVersion}`);
     } else {
-      run("npm", ["publish", cliTarball, "--access", "public", "--tag", npmDistTag, "--registry=https://registry.npmjs.org"], { env: npmEnv });
+      run("npm", ["pack", "--dry-run"], { env: npmEnv });
+      run("npm", ["publish", "--access", "public", "--tag", npmDistTag, "--registry=https://registry.npmjs.org"], { env: npmEnv });
     }
 
     const smokeDirectory = mkdtempSync(join(tmpdir(), "mediaio-smoke-"));
     try {
       run("npm", ["install", "--prefix", smokeDirectory, "--registry=https://registry.npmjs.org", `${packageName}@${releaseVersion}`], { env: npmEnv });
-      run(join(smokeDirectory, "bin", "mediaio"), ["--help"], { env: npmEnv });
+      run(join(smokeDirectory, "node_modules", ".bin", "mediaio"), ["--help"], { env: npmEnv });
     } finally {
       rmSync(smokeDirectory, { recursive: true, force: true });
     }
@@ -607,7 +564,7 @@ try {
     writeGithubReleaseState(release, githubRepository, githubTag, releaseVersion, source.cliCommit);
   } else if (operation === "upload-binary") {
     const githubToken = requiredEnv("GITHUB_TOKEN");
-    const artifacts = verifiedArtifacts(releaseVersion, source.cliCommit);
+    const artifacts = verifiedArtifacts(releaseVersion);
     const state = readGithubReleaseState(githubRepository, githubTag, releaseVersion, source.cliCommit);
     const release = await releaseFromState(apiBase, githubToken, state);
     const manifestPath = createReleaseManifest(releaseVersion, githubTag, source.cliCommit, artifacts);
@@ -619,11 +576,10 @@ try {
     await publishGithubRelease(release, apiBase, githubToken, binaryArchiveNames(releaseVersion));
   } else if (operation === "publish-npm") {
     const githubToken = requiredEnv("GITHUB_TOKEN");
-    const cliArtifact = verifiedCliArtifact(releaseVersion, source.cliCommit);
-    await publishNpm(releaseVersion, githubTag, apiBase, githubToken, cliArtifact.cliTarball);
+    await publishNpm(releaseVersion, githubTag, apiBase, githubToken);
   } else {
     const githubToken = requiredEnv("GITHUB_TOKEN");
-    const artifacts = verifiedArtifacts(releaseVersion, source.cliCommit);
+    const artifacts = verifiedArtifacts(releaseVersion);
     const gitAuth = configureGithubRemote(githubToken, githubRepository);
     syncSource(gitAuth, source.cliCommit, githubBranch);
     ensureGithubTag(gitAuth, githubTag, source.cliCommit);
@@ -631,7 +587,7 @@ try {
     const manifestPath = createReleaseManifest(releaseVersion, githubTag, source.cliCommit, artifacts);
     release = await uploadBinaryAssets(release, apiBase, githubRepository, githubToken, artifacts, manifestPath);
     await publishGithubRelease(release, apiBase, githubToken, artifacts.archiveNames);
-    await publishNpm(releaseVersion, githubTag, apiBase, githubToken, artifacts.cliTarball);
+    await publishNpm(releaseVersion, githubTag, apiBase, githubToken);
   }
 } finally {
   if (temporaryDirectory) rmSync(temporaryDirectory, { recursive: true, force: true });
