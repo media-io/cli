@@ -377,18 +377,28 @@ function readGithubReleaseState(githubRepository, githubTag, releaseVersion, cli
   return state;
 }
 
+// GitHub 创建 Draft 后，按 Release ID 读取偶尔也会经历数十秒的最终一致性延迟。
+// 上传或公开阶段最多等待约 98 秒，避免因短暂的 404 而使流水线失败。
 async function releaseFromState(apiBase, githubToken, state, options = {}) {
-  const release = await githubRequest(`${apiBase}/releases/${encodeURIComponent(state.release_id)}`, githubToken, {
-    allowNotFound: true,
-  });
-  if (!release) {
-    if (options.allowMissing) return null;
-    fail(`保存的 GitHub Draft Release ID 已不存在：${state.release_id}；请从“创建 GitHub tag/Draft Release”步骤重新执行`);
+  const retryDelaysMs = [0, 2_000, 3_000, 5_000, 8_000, 10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 10_000];
+  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
+    const release = await githubRequest(`${apiBase}/releases/${encodeURIComponent(state.release_id)}`, githubToken, {
+      allowNotFound: true,
+    });
+    if (release) {
+      if (release.tag_name !== state.github_tag) {
+        fail(`GitHub Release ID ${state.release_id} 的 tag 与状态文件不一致`);
+      }
+      return release;
+    }
+
+    if (options.retry === false || attempt === retryDelaysMs.length - 1) break;
+    const delayMs = retryDelaysMs[attempt + 1];
+    console.log(`[publish] Draft Release ID ${state.release_id} 尚未可查询，${Math.round(delayMs / 1_000)} 秒后重试（${attempt + 1}/${retryDelaysMs.length - 1}）`);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
-  if (release.tag_name !== state.github_tag) {
-    fail(`GitHub Release ID ${state.release_id} 的 tag 与状态文件不一致`);
-  }
-  return release;
+  if (options.allowMissing) return null;
+  fail(`等待 GitHub Draft Release 可查询超时：${state.github_tag}`);
 }
 
 async function ensureDraftRelease(apiBase, githubTag, cliCommit, releaseVersion, githubToken) {
@@ -588,7 +598,7 @@ try {
       { allowMissing: true },
     );
     let release = storedState
-      ? await releaseFromState(apiBase, githubToken, storedState, { allowMissing: true })
+      ? await releaseFromState(apiBase, githubToken, storedState, { allowMissing: true, retry: false })
       : null;
     if (!release) {
       release = await ensureDraftRelease(apiBase, githubTag, source.cliCommit, releaseVersion, githubToken);
