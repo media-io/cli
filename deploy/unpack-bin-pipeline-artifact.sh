@@ -18,7 +18,6 @@ for command in tar sha256sum find sort; do
   require_command "$command"
 done
 
-: "${WORKSPACE:?必须设置 WORKSPACE}"
 : "${RELEASE_VERSION:?必须设置 RELEASE_VERSION，例如 0.1.0}"
 : "${BK_CI_BUILD_NUM:?必须设置 BK_CI_BUILD_NUM}"
 : "${BIN_PIPELINE_ARTIFACT_DIR:?必须设置 BIN_PIPELINE_ARTIFACT_DIR}"
