@@ -4,6 +4,7 @@
  *
  * 用法：
  *   node deploy/publish-release.mjs sync-source
+ *   node deploy/publish-release.mjs force-github-baseline
  *   node deploy/publish-release.mjs create-draft-release
  *   node deploy/publish-release.mjs upload-binary
  *   node deploy/publish-release.mjs publish-github-release
@@ -31,6 +32,7 @@ const packageRoot = resolve(new URL("..", import.meta.url).pathname);
 const packageName = "@mediaio/cli";
 const allowedOperations = new Set([
   "sync-source",
+  "force-github-baseline",
   "create-draft-release",
   "upload-binary",
   "publish-github-release",
@@ -263,6 +265,31 @@ function syncSource(gitAuth, cliCommit, githubBranch) {
   console.log(`[publish] source synced: ${githubBranch} -> ${cliCommit}`);
 }
 
+// 仅用于首次把内网 CLI 建立为 GitHub main 的镜像基线。
+// 常规发布绝不能调用此方法，仍由 syncSource 只允许 fast-forward。
+function forceGithubBaseline(gitAuth, cliCommit, githubRepository, githubBranch) {
+  if (githubRepository !== "media-io/cli" || githubBranch !== "main") {
+    fail("force-github-baseline 仅允许更新 media-io/cli 的 main 分支");
+  }
+  if (requiredEnv("GITHUB_BASELINE_FORCE_ACK") !== "REPLACE_GITHUB_MAIN_WITH_INTERNAL_CLI") {
+    fail("必须将 GITHUB_BASELINE_FORCE_ACK 设置为 REPLACE_GITHUB_MAIN_WITH_INTERNAL_CLI 才能执行一次性基线覆盖");
+  }
+
+  run("git", ["fetch", "--no-tags", gitAuth.remoteName, githubBranch], { env: gitAuth.env });
+  const remoteCommit = run("git", ["rev-parse", `${gitAuth.remoteName}/${githubBranch}`], { env: gitAuth.env });
+  console.log(`[publish] baseline force: ${githubRepository}/${githubBranch} ${remoteCommit} -> ${cliCommit}`);
+  run("git", [
+    "push",
+    `--force-with-lease=refs/heads/${githubBranch}:${remoteCommit}`,
+    gitAuth.remoteName,
+    `${cliCommit}:refs/heads/${githubBranch}`,
+  ], { env: gitAuth.env });
+
+  const remoteHead = run("git", ["ls-remote", gitAuth.remoteName, `refs/heads/${githubBranch}`], { env: gitAuth.env }).split(/\s+/)[0];
+  if (remoteHead !== cliCommit) fail(`GitHub ${githubBranch} 基线覆盖后提交校验失败`);
+  console.log(`[publish] baseline force completed: ${githubBranch} -> ${cliCommit}`);
+}
+
 function assertSourceAlreadySynced(gitAuth, cliCommit, githubBranch) {
   run("git", ["fetch", "--no-tags", gitAuth.remoteName, githubBranch], { env: gitAuth.env });
   if (!tryRun("git", ["merge-base", "--is-ancestor", cliCommit, `${gitAuth.remoteName}/${githubBranch}`], { env: gitAuth.env }).ok) {
@@ -439,7 +466,7 @@ async function publishNpm(releaseVersion, githubTag, apiBase, githubToken, cliTa
 }
 
 function printUsage() {
-  console.log("用法：node deploy/publish-release.mjs <sync-source|create-draft-release|upload-binary|publish-github-release|publish-npm|all>");
+  console.log("用法：node deploy/publish-release.mjs <sync-source|force-github-baseline|create-draft-release|upload-binary|publish-github-release|publish-npm|all>");
 }
 
 const operation = process.argv[2] ?? "all";
@@ -472,6 +499,10 @@ try {
     const githubToken = requiredEnv("GITHUB_TOKEN");
     const gitAuth = configureGithubRemote(githubToken, githubRepository);
     syncSource(gitAuth, source.cliCommit, githubBranch);
+  } else if (operation === "force-github-baseline") {
+    const githubToken = requiredEnv("GITHUB_TOKEN");
+    const gitAuth = configureGithubRemote(githubToken, githubRepository);
+    forceGithubBaseline(gitAuth, source.cliCommit, githubRepository, githubBranch);
   } else if (operation === "create-draft-release") {
     const githubToken = requiredEnv("GITHUB_TOKEN");
     const gitAuth = configureGithubRemote(githubToken, githubRepository);
