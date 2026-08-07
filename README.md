@@ -7,13 +7,12 @@ binary，并通过 JavaScript launcher 透传参数、标准输入输出、signa
 整体技术方案参考：
 `media-plugin-docs/architecture/MCP、CLI与Agent插件技术方案-v2.md`。
 
-> 当前发布包名是 `@mediaiodemo/cli`；技术方案中的目标包名是 `@mediaio/cli`，
-> 尚未在本仓库完成切换。安装、排障和发布时应以 `package.json.name` 为准。
+> 正式发布包名为 `@mediaio/cli`。安装、排障和发布均以 `package.json.name` 为准。
 
 ## 架构位置
 
 ```text
-npm install -g @mediaiodemo/cli
+npm install -g @mediaio/cli
     ↓ postinstall
 install.js 下载 vendor/mediaio（Windows 为 vendor/mediaio.exe）
     ↓
@@ -35,7 +34,7 @@ Skills、MCP 服务或 Media.io API client 实现。
 ## 安装
 
 ```bash
-npm install -g @mediaiodemo/cli
+npm install -g @mediaio/cli
 ```
 
 安装完成后：
@@ -149,7 +148,7 @@ npm publish --access public
 发布后应在干净环境验证：
 
 ```bash
-npm install -g @mediaiodemo/cli@<version>
+npm install -g @mediaio/cli@<version>
 mediaio --help
 ```
 
@@ -174,8 +173,8 @@ windows/amd64
 如果看到 `binary not found at .../vendor/mediaio`，说明 `postinstall` 未执行或执行失败。
 
 ```bash
-npm uninstall -g @mediaiodemo/cli
-npm install -g @mediaiodemo/cli
+npm uninstall -g @mediaio/cli
+npm install -g @mediaio/cli
 ```
 
 使用 `npm install --ignore-scripts` 安装时不会下载 binary；当前版本尚未提供独立的
@@ -208,7 +207,7 @@ Node 报告的其他 `process.platform` 或 `process.arch` 会直接终止安装
 
 | 领域 | 当前实现 | v2 目标 |
 |---|---|---|
-| npm 包名 | `@mediaiodemo/cli` | 待冻结，方案暂写 `@mediaio/cli` |
+| npm 包名 | `@mediaio/cli` | `@mediaio/cli` |
 | 命令入口 | 仅 `mediaio` | 仅 `mediaio`，不提供缩写别名 |
 | 版本锁定 | npm version 直接拼接下载 URL | 独立 binary manifest 固定精确版本 |
 | 完整性校验 | 尚无 checksum/signature 校验 | SHA-256、签名和 binary version 校验 |

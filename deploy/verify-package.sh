@@ -34,14 +34,20 @@ if [[ -n "$(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
   fail "CLI_RELEASE_OUTPUT_DIR 必须为空：$OUTPUT_DIR"
 fi
 
-mapfile -t package_info < <(node - <<'NODE'
-const pkg = require("./package.json");
-console.log(pkg.name);
-console.log(pkg.version);
-NODE
-)
-PACKAGE_NAME="${package_info[0]:-}"
-PACKAGE_VERSION="${package_info[1]:-}"
+OWN_NPM_CACHE=0
+if [[ -z "${NPM_CONFIG_CACHE:-}" ]]; then
+  export NPM_CONFIG_CACHE="$(mktemp -d "${TMPDIR:-/tmp}/mediaio-npm-cache.XXXXXX")"
+  OWN_NPM_CACHE=1
+fi
+cleanup() {
+  if [[ "$OWN_NPM_CACHE" == "1" ]]; then
+    rm -rf "$NPM_CONFIG_CACHE"
+  fi
+}
+trap cleanup EXIT
+
+PACKAGE_NAME="$(node -p 'require("./package.json").name')"
+PACKAGE_VERSION="$(node -p 'require("./package.json").version')"
 
 [[ "$PACKAGE_NAME" == "@mediaio/cli" ]] || \
   fail "正式发布包名必须是 @mediaio/cli，当前为：$PACKAGE_NAME"
