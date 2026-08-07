@@ -316,7 +316,17 @@ function ensureGithubTag(gitAuth, githubTag, cliCommit) {
 }
 
 async function releaseForTag(apiBase, githubTag, githubToken) {
-  return githubRequest(`${apiBase}/releases/tags/${encodeURIComponent(githubTag)}`, githubToken, { allowNotFound: true });
+  const taggedRelease = await githubRequest(
+    `${apiBase}/releases/tags/${encodeURIComponent(githubTag)}`,
+    githubToken,
+    { allowNotFound: true },
+  );
+  if (taggedRelease) return taggedRelease;
+
+  // GitHub 的按 tag 查询在部分场景不会返回 Draft Release；已认证的
+  // Release 列表会包含该 Draft，因此用它作为安全回退，不会创建新 Release。
+  const releases = await githubRequest(`${apiBase}/releases?per_page=100`, githubToken);
+  return releases.find((release) => release.tag_name === githubTag) ?? null;
 }
 
 async function ensureDraftRelease(apiBase, githubTag, cliCommit, releaseVersion, githubToken) {
