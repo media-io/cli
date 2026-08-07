@@ -33,8 +33,27 @@ BUNDLE_NAME="${BIN_PIPELINE_ARTIFACT_NAME:-$EXPECTED_BUNDLE_NAME}"
 [[ "$BUNDLE_NAME" == "$EXPECTED_BUNDLE_NAME" ]] || \
   fail "BIN_PIPELINE_ARTIFACT_NAME 必须为：$EXPECTED_BUNDLE_NAME"
 
-BUNDLE_PATH="$BIN_PIPELINE_ARTIFACT_DIR/$BUNDLE_NAME"
-[[ -f "$BUNDLE_PATH" ]] || fail "找不到已拉取的 BIN 临时构件：$BUNDLE_PATH"
+bundle_matches=()
+while IFS= read -r -d '' candidate; do
+  bundle_matches+=("$candidate")
+done < <(find "$BIN_PIPELINE_ARTIFACT_DIR" -type f -name "$BUNDLE_NAME" -print0)
+
+# 部分构件拉取插件会在目标目录下保留自定义仓库的目录层级。若目标目录中
+# 没有直接命中，再在当前 Job 的工作区中定位同名总包；必须仍然唯一。
+if [[ "${#bundle_matches[@]}" -eq 0 ]]; then
+  while IFS= read -r -d '' candidate; do
+    bundle_matches+=("$candidate")
+  done < <(find "$WORKSPACE" -type f -name "$BUNDLE_NAME" -print0)
+fi
+
+if [[ "${#bundle_matches[@]}" -eq 0 ]]; then
+  fail "找不到已拉取的 BIN 临时构件：$BUNDLE_NAME（已检查 $BIN_PIPELINE_ARTIFACT_DIR 和 $WORKSPACE）"
+fi
+if [[ "${#bundle_matches[@]}" -ne 1 ]]; then
+  printf '[bin-unpack] matched bundle: %s\n' "${bundle_matches[@]}" >&2
+  fail "找到多个同名 BIN 临时构件，拒绝猜测使用哪个"
+fi
+BUNDLE_PATH="${bundle_matches[0]}"
 
 expected_files="$(printf '%s\n' \
   "mediaio_${RELEASE_VERSION}_darwin_amd64.tar.gz" \
