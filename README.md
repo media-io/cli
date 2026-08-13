@@ -4,8 +4,7 @@ Media.io CLI 的 npm 安装与启动层。该包本身不实现 Media.io API，�
 `postinstall` 阶段下载与当前操作系统、CPU 架构匹配的 `media-plugin-bin` Go
 binary，并通过 JavaScript launcher 透传参数、标准输入输出、signal 和退出码。
 
-整体技术方案参考：
-`media-plugin-docs/architecture/MCP、CLI与Agent插件技术方案-v2.md`。
+整体技术方案参考：[MCP、CLI 与 Agent 插件技术方案 v2](../media-plugin-mcp/docs/architecture/MCP、CLI与Agent插件技术方案-v2.md)。
 
 > 正式发布包名为 `@mediaio/cli`。安装、排障和发布均以 `package.json.name` 为准。
 
