@@ -1,7 +1,7 @@
 {
   "name": "@mediaio/cli",
   "version": "0.1.0",
-  "description": "mediaio AI CLI — generate images and videos from the terminal.",
+  "description": "Media.io AI CLI — generate images and videos from the terminal.",
   "bin": {
     "mediaio": "bin/mediaio.js"
   },
