@@ -62,23 +62,27 @@ function assertBaseVersion(version) {
   }
 }
 
-function assertReleaseSelection(baseVersion, releaseVersion, releaseDistTag) {
+function parseCiSuffixSelection(value) {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  fail(`RELEASE_WITH_CI_SUFFIX 仅支持 true 或 false：${value}`);
+}
+
+function assertReleaseSelection(baseVersion, releaseVersion, releaseDistTag, withCiSuffix) {
   assertBaseVersion(baseVersion);
   assertSemVer(releaseVersion);
   if (releaseDistTag !== "next" && releaseDistTag !== "latest") {
     fail(`RELEASE_DIST_TAG 仅支持 next 或 latest：${releaseDistTag}`);
   }
-  if (releaseDistTag === "latest") {
-    if (releaseVersion !== baseVersion) {
-      fail(`latest 发布的 RELEASE_VERSION 必须等于 BASE_VERSION：${releaseVersion}`);
-    }
+  if (!withCiSuffix) {
+    if (releaseVersion !== baseVersion) fail(`未启用 CI 后缀时 RELEASE_VERSION 必须等于 BASE_VERSION：${releaseVersion}`);
     return;
   }
 
   const prefix = `${baseVersion}-ci.`;
   const buildNumber = releaseVersion.startsWith(prefix) ? releaseVersion.slice(prefix.length) : "";
   if (!/^[1-9][0-9]*$/.test(buildNumber)) {
-    fail(`next 发布的 RELEASE_VERSION 必须为 ${baseVersion}-ci.<正整数>：${releaseVersion}`);
+    fail(`启用 CI 后缀时 RELEASE_VERSION 必须为 ${baseVersion}-ci.<正整数>：${releaseVersion}`);
   }
 }
 
@@ -410,13 +414,14 @@ async function ensureDraftRelease(apiBase, githubTag, cliCommit, releaseVersion,
   return release;
 }
 
-function createReleaseManifest(baseVersion, releaseVersion, releaseDistTag, githubTag, cliCommit, artifacts) {
+function createReleaseManifest(baseVersion, releaseVersion, releaseDistTag, withCiSuffix, githubTag, cliCommit, artifacts) {
   temporaryDirectory = mkdtempSync(join(tmpdir(), "mediaio-release-"));
   const releaseManifestPath = join(temporaryDirectory, "release-manifest.json");
   const releaseManifest = {
     schema_version: 1,
     base_version: baseVersion,
     release_dist_tag: releaseDistTag,
+    release_with_ci_suffix: withCiSuffix,
     release_version: releaseVersion,
     github_tag: githubTag,
     cli: {
@@ -571,11 +576,13 @@ if (process.argv.length > 3 || !allowedOperations.has(operation)) {
 
 const releaseVersion = requiredEnv("RELEASE_VERSION");
 const baseVersion = process.env.BASE_VERSION ?? releaseVersion;
-const releaseDistTag = process.env.RELEASE_DIST_TAG ?? "latest";
+// 发布渠道是安全边界：缺失时不能静默降级为 latest，避免预发布误占用稳定版 tag/npm 版本。
+const releaseDistTag = requiredEnv("RELEASE_DIST_TAG");
+const withCiSuffix = parseCiSuffixSelection(requiredEnv("RELEASE_WITH_CI_SUFFIX"));
 if (process.env.NPM_DIST_TAG && process.env.NPM_DIST_TAG !== releaseDistTag) {
   fail("NPM_DIST_TAG 必须由 RELEASE_DIST_TAG 派生，二者不一致");
 }
-assertReleaseSelection(baseVersion, releaseVersion, releaseDistTag);
+assertReleaseSelection(baseVersion, releaseVersion, releaseDistTag, withCiSuffix);
 const githubRepository = process.env.GITHUB_REPOSITORY ?? "media-io/cli";
 const githubBranch = process.env.GITHUB_BRANCH ?? "main";
 const githubTag = `v${releaseVersion}`;
@@ -590,6 +597,7 @@ try {
   console.log(`[publish] base version: ${baseVersion}`);
   console.log(`[publish] release: ${releaseVersion}`);
   console.log(`[publish] dist-tag: ${releaseDistTag}`);
+  console.log(`[publish] CI suffix: ${withCiSuffix}`);
   console.log(`[publish] CLI commit: ${source.cliCommit}`);
 
   if (operation === "sync-source") {
@@ -625,7 +633,7 @@ try {
     const artifacts = verifiedArtifacts(releaseVersion);
     const state = readGithubReleaseState(githubRepository, githubTag, releaseVersion, source.cliCommit);
     const release = await releaseFromState(apiBase, githubToken, state);
-    const manifestPath = createReleaseManifest(baseVersion, releaseVersion, releaseDistTag, githubTag, source.cliCommit, artifacts);
+    const manifestPath = createReleaseManifest(baseVersion, releaseVersion, releaseDistTag, withCiSuffix, githubTag, source.cliCommit, artifacts);
     await uploadBinaryAssets(release, apiBase, githubRepository, githubToken, artifacts, manifestPath);
   } else if (operation === "publish-github-release") {
     const githubToken = requiredEnv("GITHUB_TOKEN");
@@ -642,7 +650,7 @@ try {
     syncSource(gitAuth, source.cliCommit, githubBranch);
     ensureGithubTag(gitAuth, githubTag, source.cliCommit);
     let release = await ensureDraftRelease(apiBase, githubTag, source.cliCommit, releaseVersion, githubToken);
-    const manifestPath = createReleaseManifest(baseVersion, releaseVersion, releaseDistTag, githubTag, source.cliCommit, artifacts);
+    const manifestPath = createReleaseManifest(baseVersion, releaseVersion, releaseDistTag, withCiSuffix, githubTag, source.cliCommit, artifacts);
     release = await uploadBinaryAssets(release, apiBase, githubRepository, githubToken, artifacts, manifestPath);
     await publishGithubRelease(release, apiBase, githubToken, artifacts.archiveNames);
     await publishNpm(releaseVersion, releaseDistTag, githubTag, apiBase, githubToken);
