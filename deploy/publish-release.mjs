@@ -659,3 +659,7 @@ try {
   if (temporaryDirectory) rmSync(temporaryDirectory, { recursive: true, force: true });
   if (askPassDirectory) rmSync(askPassDirectory, { recursive: true, force: true });
 }
+
+// Node 18 的 fetch 连接偶尔会让事件循环在发布完成后继续存活。
+// 此处已完成全部发布与临时目录清理，显式退出以结束流水线 Bash 节点。
+process.exit(0);
