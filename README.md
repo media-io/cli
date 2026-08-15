@@ -13,7 +13,7 @@ npm install -g @mediaio/cli
     ↓ postinstall
 install.js 下载 vendor/mediaio（Windows 为 vendor/mediaio.exe）
     ↓
-mediaio 命令 → bin/mediaio.js → bin/run.js → Go binary
+mediaio / mi 命令 → JavaScript launcher → Go binary
     ↓
 Media.io 公网 API
 ```
@@ -38,12 +38,14 @@ npm install -g @mediaio/cli
 
 ```bash
 mediaio --help
+mi --help
 mediaio auth login
 mediaio generate list
 ```
 
-CLI 只提供 `mediaio` 命令，不提供缩写别名。命令、binary、Release asset 和安装目录
-均使用完整的 `mediaio` 名称。
+CLI 同时提供 `mediaio` 与 `mi` 两个等价命令，二者调用同一 launcher、binary、配置和
+凭据。`mediaio` 是正式命令：所有文档、自动化脚本与排障指引均使用它；`mi` 仅作为终端
+输入的便捷别名。若用户机器已有同名 `mi` 命令发生 PATH 冲突，继续使用 `mediaio` 即可。
 
 ## postinstall 做了什么
 
@@ -115,6 +117,7 @@ cp ../media-plugin-bin/dist/mediaio vendor/mediaio
 chmod +x vendor/mediaio
 
 node bin/mediaio.js --help
+node bin/mi.js --help
 node bin/mediaio.js generate list
 ```
 

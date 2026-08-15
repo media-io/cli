@@ -17,6 +17,7 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
+  cpSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -52,6 +53,36 @@ function requiredEnv(name) {
 function assertSemVer(version) {
   if (!/^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$/.test(version)) {
     fail(`RELEASE_VERSION 不是合法的 SemVer：${version}`);
+  }
+}
+
+function assertBaseVersion(version) {
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) {
+    fail(`BASE_VERSION 必须是未带 prerelease/build metadata 的 SemVer：${version}`);
+  }
+}
+
+function parseCiSuffixSelection(value) {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  fail(`RELEASE_WITH_CI_SUFFIX 仅支持 true 或 false：${value}`);
+}
+
+function assertReleaseSelection(baseVersion, releaseVersion, releaseDistTag, withCiSuffix) {
+  assertBaseVersion(baseVersion);
+  assertSemVer(releaseVersion);
+  if (releaseDistTag !== "next" && releaseDistTag !== "latest") {
+    fail(`RELEASE_DIST_TAG 仅支持 next 或 latest：${releaseDistTag}`);
+  }
+  if (!withCiSuffix) {
+    if (releaseVersion !== baseVersion) fail(`未启用 CI 后缀时 RELEASE_VERSION 必须等于 BASE_VERSION：${releaseVersion}`);
+    return;
+  }
+
+  const prefix = `${baseVersion}-ci.`;
+  const buildNumber = releaseVersion.startsWith(prefix) ? releaseVersion.slice(prefix.length) : "";
+  if (!/^[1-9][0-9]*$/.test(buildNumber)) {
+    fail(`启用 CI 后缀时 RELEASE_VERSION 必须为 ${baseVersion}-ci.<正整数>：${releaseVersion}`);
   }
 }
 
@@ -143,15 +174,15 @@ async function githubRequest(url, token, options = {}) {
   return body ? JSON.parse(body) : {};
 }
 
-function sourceContext(releaseVersion) {
+function sourceContext(baseVersion) {
   for (const command of ["git", "node"]) {
     if (!tryRun(command, ["--version"]).ok) fail(`缺少命令：${command}`);
   }
 
   const pkg = readJson(join(packageRoot, "package.json"));
   if (pkg.name !== packageName) fail(`正式发布包名必须是 ${packageName}，当前为：${pkg.name}`);
-  if (pkg.version !== releaseVersion) {
-    fail(`package.json.version (${pkg.version}) 必须等于 RELEASE_VERSION (${releaseVersion})`);
+  if (pkg.version !== baseVersion) {
+    fail(`package.json.version (${pkg.version}) 必须等于 BASE_VERSION (${baseVersion})`);
   }
 
   const cliCommit = run("git", ["rev-parse", "HEAD"]);
@@ -383,11 +414,14 @@ async function ensureDraftRelease(apiBase, githubTag, cliCommit, releaseVersion,
   return release;
 }
 
-function createReleaseManifest(releaseVersion, githubTag, cliCommit, artifacts) {
+function createReleaseManifest(baseVersion, releaseVersion, releaseDistTag, withCiSuffix, githubTag, cliCommit, artifacts) {
   temporaryDirectory = mkdtempSync(join(tmpdir(), "mediaio-release-"));
   const releaseManifestPath = join(temporaryDirectory, "release-manifest.json");
   const releaseManifest = {
     schema_version: 1,
+    base_version: baseVersion,
+    release_dist_tag: releaseDistTag,
+    release_with_ci_suffix: withCiSuffix,
     release_version: releaseVersion,
     github_tag: githubTag,
     cli: {
@@ -396,6 +430,8 @@ function createReleaseManifest(releaseVersion, githubTag, cliCommit, artifacts) 
     },
     bin: {
       commit: artifacts.binBuild.bin_commit,
+      build_number: artifacts.binBuild.build_number,
+      built_at: artifacts.binBuild.built_at,
       go_version: artifacts.binBuild.go_version,
     },
     assets: artifacts.archiveNames.map((name) => ({ name, sha256: artifacts.checksums.get(name) })),
@@ -464,7 +500,24 @@ async function publishGithubRelease(release, apiBase, githubToken, archiveNames)
   return publicRelease;
 }
 
-async function publishNpm(releaseVersion, githubTag, apiBase, githubToken) {
+function createNpmPublishCopy(releaseVersion) {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "mediaio-npm-package-"));
+  const publishRoot = join(temporaryRoot, "package");
+  const excludedNames = new Set([".git", "node_modules", "vendor"]);
+  cpSync(packageRoot, publishRoot, {
+    recursive: true,
+    filter: (source) => !excludedNames.has(basename(source)),
+  });
+
+  const pkgPath = join(publishRoot, "package.json");
+  const pkg = readJson(pkgPath);
+  if (pkg.name !== packageName) fail(`正式发布包名必须是 ${packageName}，当前为：${pkg.name}`);
+  pkg.version = releaseVersion;
+  writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
+  return { publishRoot, temporaryRoot };
+}
+
+async function publishNpm(releaseVersion, releaseDistTag, githubTag, apiBase, githubToken) {
   const release = await releaseForTag(apiBase, githubTag, githubToken);
   if (!release || release.draft) fail("GitHub Release 尚未公开，禁止发布 npm");
   const uploadedNames = new Set(release.assets.map((asset) => asset.name));
@@ -474,8 +527,9 @@ async function publishNpm(releaseVersion, githubTag, apiBase, githubToken) {
 
   if (!tryRun("npm", ["--version"]).ok) fail("缺少命令：npm");
   const npmToken = requiredEnv("NODE_AUTH_TOKEN");
-  const npmDistTag = process.env.NPM_DIST_TAG ?? "latest";
+  const npmDistTag = releaseDistTag;
   const npmDirectory = mkdtempSync(join(tmpdir(), "mediaio-npmrc-"));
+  const publishCopy = createNpmPublishCopy(releaseVersion);
   const npmrcPath = join(npmDirectory, ".npmrc");
   writeFileSync(npmrcPath, `//registry.npmjs.org/:_authToken=${npmToken}\n`, { mode: 0o600 });
   const npmEnv = { ...process.env, NPM_CONFIG_USERCONFIG: npmrcPath };
@@ -487,19 +541,21 @@ async function publishNpm(releaseVersion, githubTag, apiBase, githubToken) {
       }
       console.log(`[publish] npm version already present: ${packageName}@${releaseVersion}`);
     } else {
-      run("npm", ["pack", "--dry-run"], { env: npmEnv });
-      run("npm", ["publish", "--access", "public", "--tag", npmDistTag, "--registry=https://registry.npmjs.org"], { env: npmEnv });
+      run("npm", ["pack", "--dry-run"], { cwd: publishCopy.publishRoot, env: npmEnv });
+      run("npm", ["publish", "--access", "public", "--tag", npmDistTag, "--registry=https://registry.npmjs.org"], { cwd: publishCopy.publishRoot, env: npmEnv });
     }
 
     const smokeDirectory = mkdtempSync(join(tmpdir(), "mediaio-smoke-"));
     try {
       run("npm", ["install", "--prefix", smokeDirectory, "--registry=https://registry.npmjs.org", `${packageName}@${releaseVersion}`], { env: npmEnv });
       run(join(smokeDirectory, "node_modules", ".bin", "mediaio"), ["--help"], { env: npmEnv });
+      run(join(smokeDirectory, "node_modules", ".bin", "mi"), ["--help"], { env: npmEnv });
     } finally {
       rmSync(smokeDirectory, { recursive: true, force: true });
     }
   } finally {
     rmSync(npmDirectory, { recursive: true, force: true });
+    rmSync(publishCopy.temporaryRoot, { recursive: true, force: true });
   }
   console.log(`[publish] npm published and verified: ${packageName}@${releaseVersion}`);
 }
@@ -519,7 +575,14 @@ if (process.argv.length > 3 || !allowedOperations.has(operation)) {
 }
 
 const releaseVersion = requiredEnv("RELEASE_VERSION");
-assertSemVer(releaseVersion);
+const baseVersion = process.env.BASE_VERSION ?? releaseVersion;
+// 发布渠道是安全边界：缺失时不能静默降级为 latest，避免预发布误占用稳定版 tag/npm 版本。
+const releaseDistTag = requiredEnv("RELEASE_DIST_TAG");
+const withCiSuffix = parseCiSuffixSelection(requiredEnv("RELEASE_WITH_CI_SUFFIX"));
+if (process.env.NPM_DIST_TAG && process.env.NPM_DIST_TAG !== releaseDistTag) {
+  fail("NPM_DIST_TAG 必须由 RELEASE_DIST_TAG 派生，二者不一致");
+}
+assertReleaseSelection(baseVersion, releaseVersion, releaseDistTag, withCiSuffix);
 const githubRepository = process.env.GITHUB_REPOSITORY ?? "media-io/cli";
 const githubBranch = process.env.GITHUB_BRANCH ?? "main";
 const githubTag = `v${releaseVersion}`;
@@ -529,9 +592,12 @@ let temporaryDirectory = "";
 let askPassDirectory = "";
 
 try {
-  const source = sourceContext(releaseVersion);
+  const source = sourceContext(baseVersion);
   console.log(`[publish] phase: ${operation}`);
+  console.log(`[publish] base version: ${baseVersion}`);
   console.log(`[publish] release: ${releaseVersion}`);
+  console.log(`[publish] dist-tag: ${releaseDistTag}`);
+  console.log(`[publish] CI suffix: ${withCiSuffix}`);
   console.log(`[publish] CLI commit: ${source.cliCommit}`);
 
   if (operation === "sync-source") {
@@ -567,7 +633,7 @@ try {
     const artifacts = verifiedArtifacts(releaseVersion);
     const state = readGithubReleaseState(githubRepository, githubTag, releaseVersion, source.cliCommit);
     const release = await releaseFromState(apiBase, githubToken, state);
-    const manifestPath = createReleaseManifest(releaseVersion, githubTag, source.cliCommit, artifacts);
+    const manifestPath = createReleaseManifest(baseVersion, releaseVersion, releaseDistTag, withCiSuffix, githubTag, source.cliCommit, artifacts);
     await uploadBinaryAssets(release, apiBase, githubRepository, githubToken, artifacts, manifestPath);
   } else if (operation === "publish-github-release") {
     const githubToken = requiredEnv("GITHUB_TOKEN");
@@ -576,7 +642,7 @@ try {
     await publishGithubRelease(release, apiBase, githubToken, binaryArchiveNames(releaseVersion));
   } else if (operation === "publish-npm") {
     const githubToken = requiredEnv("GITHUB_TOKEN");
-    await publishNpm(releaseVersion, githubTag, apiBase, githubToken);
+    await publishNpm(releaseVersion, releaseDistTag, githubTag, apiBase, githubToken);
   } else {
     const githubToken = requiredEnv("GITHUB_TOKEN");
     const artifacts = verifiedArtifacts(releaseVersion);
@@ -584,10 +650,10 @@ try {
     syncSource(gitAuth, source.cliCommit, githubBranch);
     ensureGithubTag(gitAuth, githubTag, source.cliCommit);
     let release = await ensureDraftRelease(apiBase, githubTag, source.cliCommit, releaseVersion, githubToken);
-    const manifestPath = createReleaseManifest(releaseVersion, githubTag, source.cliCommit, artifacts);
+    const manifestPath = createReleaseManifest(baseVersion, releaseVersion, releaseDistTag, withCiSuffix, githubTag, source.cliCommit, artifacts);
     release = await uploadBinaryAssets(release, apiBase, githubRepository, githubToken, artifacts, manifestPath);
     await publishGithubRelease(release, apiBase, githubToken, artifacts.archiveNames);
-    await publishNpm(releaseVersion, githubTag, apiBase, githubToken);
+    await publishNpm(releaseVersion, releaseDistTag, githubTag, apiBase, githubToken);
   }
 } finally {
   if (temporaryDirectory) rmSync(temporaryDirectory, { recursive: true, force: true });
