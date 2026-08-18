@@ -76,8 +76,9 @@ function download(targetUrl, dest, redirects = 0) {
   console.log(`@mediaio/cli: downloading ${url}`);
   await download(url, tarballPath);
   console.log(`downloaded ${url}`);
-  // pipe via stdin: bsdtar on Windows misparses "-f" paths under "@scope" dirs as user@host remote syntax
-  execFileSync("tar", ["-xz", "-C", vendorDir, binName], {
+  // 通过 stdin 传入压缩包：Windows 下 bsdtar 会把含 "C:" 或 "@scope" 的 "-f <路径>" 误判为 user@host 远程语法；
+  // 必须显式指定 "-f -" 从标准输入读取，否则 bsdtar 会回退到默认磁带设备 \\.\tape0 并报错
+  execFileSync("tar", ["-xzf", "-", "-C", vendorDir, binName], {
     input: fs.readFileSync(tarballPath),
   });
   if (platform !== "windows") {
