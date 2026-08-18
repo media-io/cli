@@ -1,0 +1,38 @@
+{
+  "name": "@mediaio/cli",
+  "version": "0.1.5",
+  "description": "Media.io AI CLI — generate images and videos from the terminal.",
+  "bin": {
+    "mediaio": "bin/mediaio.js",
+    "mi": "bin/mi.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "bin/",
+    "install.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=14"
+  },
+  "license": "MIT",
+  "homepage": "https://media.io",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/media-io/cli.git"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
