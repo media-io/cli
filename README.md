@@ -1,12 +1,10 @@
-# media-plugin-cli
+# @mediaio/cli
 
 Media.io CLI 的 npm 安装与启动层。该包本身不实现 Media.io API，而是在
 `postinstall` 阶段下载与当前操作系统、CPU 架构匹配的 `media-plugin-bin` Go
 binary，并通过 JavaScript launcher 透传参数、标准输入输出、signal 和退出码。
 
 整体技术方案参考：[MCP、CLI 与 Agent 插件技术方案 v2](../media-plugin-mcp/docs/architecture/MCP、CLI与Agent插件技术方案-v2.md)。
-
-> 正式发布包名为 `@mediaio/cli`。安装、排障和发布均以 `package.json.name` 为准。
 
 ## 架构位置
 
@@ -15,7 +13,7 @@ npm install -g @mediaio/cli
     ↓ postinstall
 install.js 下载 vendor/mediaio（Windows 为 vendor/mediaio.exe）
     ↓
-mediaio 命令 → bin/mediaio.js → bin/run.js → Go binary
+mediaio / mi 命令 → JavaScript launcher → Go binary
     ↓
 Media.io 公网 API
 ```
@@ -40,12 +38,14 @@ npm install -g @mediaio/cli
 
 ```bash
 mediaio --help
+mi --help
 mediaio auth login
 mediaio generate list
 ```
 
-CLI 只提供 `mediaio` 命令，不提供缩写别名。命令、binary、Release asset 和安装目录
-均使用完整的 `mediaio` 名称。
+CLI 同时提供 `mediaio` 与 `mi` 两个等价命令，二者调用同一 launcher、binary、配置和
+凭据。`mediaio` 是正式命令：所有文档、自动化脚本与排障指引均使用它；`mi` 仅作为终端
+输入的便捷别名。若用户机器已有同名 `mi` 命令发生 PATH 冲突，继续使用 `mediaio` 即可。
 
 ## postinstall 做了什么
 
@@ -117,6 +117,7 @@ cp ../media-plugin-bin/dist/mediaio vendor/mediaio
 chmod +x vendor/mediaio
 
 node bin/mediaio.js --help
+node bin/mi.js --help
 node bin/mediaio.js generate list
 ```
 
