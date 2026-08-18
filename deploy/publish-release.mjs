@@ -297,10 +297,19 @@ function ensureGithubTag(gitAuth, githubTag, cliCommit) {
     console.log(`[publish] tag already present: ${githubTag}`);
     return;
   }
+  // 流水线 checkout 可能已带同名内网 tag，直接 git tag -a 会报“标签已存在”。
+  // 这里只重建工作区内的本地 tag，不影响内网仓库；GitHub 侧不存在同名 tag 已在上面校验过。
+  const localTagCommit = tryRun("git", ["rev-parse", "--verify", "--quiet", `refs/tags/${githubTag}^{commit}`], { env: gitAuth.env });
+  if (localTagCommit.ok) {
+    console.log(`[publish] local tag exists: ${githubTag} -> ${localTagCommit.stdout}; recreate for ${cliCommit}`);
+    run("git", ["tag", "-d", githubTag], { env: gitAuth.env });
+  }
   run("git", ["config", "user.name", process.env.GIT_TAGGER_NAME ?? "mediaio-release-bot"], { env: gitAuth.env });
   run("git", ["config", "user.email", process.env.GIT_TAGGER_EMAIL ?? "mediaio-release-bot@users.noreply.github.com"], { env: gitAuth.env });
   run("git", ["tag", "-a", githubTag, cliCommit, "-m", `Release ${githubTag}`], { env: gitAuth.env });
-  run("git", ["push", gitAuth.remoteName, `refs/tags/${githubTag}`], { env: gitAuth.env });
+  run("git", ["push", gitAuth.remoteName, `refs/tags/${githubTag}:refs/tags/${githubTag}`], { env: gitAuth.env });
+  const pushedTagCommit = run("git", ["ls-remote", gitAuth.remoteName, `refs/tags/${githubTag}^{}`], { env: gitAuth.env }).split(/\s+/)[0];
+  if (pushedTagCommit !== cliCommit) fail(`GitHub tag ${githubTag} 推送后未指向当前 CLI 提交`);
   console.log(`[publish] tag created: ${githubTag}`);
 }
 
