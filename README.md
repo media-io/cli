@@ -1,40 +1,45 @@
 # @mediaio/cli
 
-Media.io CLI 的 npm 安装与启动层。该包本身不实现 Media.io API，而是在
-`postinstall` 阶段下载与当前操作系统、CPU 架构匹配的 `media-plugin-bin` Go
-binary，并通过 JavaScript launcher 透传参数、标准输入输出、signal 和退出码。
+This repository provides the npm installation and launcher layer for the
+Media.io CLI. It does not implement the Media.io API itself. Instead, during
+`postinstall`, it downloads the `media-plugin-bin` Go binary that matches the
+current operating system and CPU architecture, then invokes it through a
+JavaScript launcher that forwards arguments, stdio, signals, and exit codes.
 
-整体技术方案参考：[MCP、CLI 与 Agent 插件技术方案 v2](../media-plugin-mcp/docs/architecture/MCP、CLI与Agent插件技术方案-v2.md)。
+For the broader technical design, see
+[MCP, CLI, and Agent Plugin Technical Plan v2](../media-plugin-mcp/docs/architecture/MCP、CLI与Agent插件技术方案-v2.md).
 
-## 架构位置
+## Architecture
 
 ```text
 npm install -g @mediaio/cli
     ↓ postinstall
-install.js 下载 vendor/mediaio（Windows 为 vendor/mediaio.exe）
+install.js downloads vendor/mediaio (or vendor/mediaio.exe on Windows)
     ↓
-mediaio / mi 命令 → JavaScript launcher → Go binary
+mediaio / mi command → JavaScript launcher → Go binary
     ↓
-Media.io 公网 API
+Media.io public API
 ```
 
-`media-plugin-main` 中的 Agent Skills 可以复用这套 CLI/binary 基座；本仓库不包含
-Skills、MCP 服务或 Media.io API client 实现。
+The agent skills in `media-plugin-main` can reuse this CLI/binary foundation.
+This repository does not include skills, an MCP server, or a Media.io API
+client implementation.
 
-## 环境要求
+## Requirements
 
-- Node.js 14 或更高版本。
-- npm、pnpm、Yarn 或 Bun；安装器会记录检测到的包管理器。
-- 系统提供 `tar` 命令。当前安装器使用 `tar` 解压 binary，Windows 环境也必须可用。
-- 能访问当前配置的 GitHub Release 下载地址。
+- Node.js 14 or later.
+- npm, pnpm, Yarn, or Bun. The installer records the detected package manager.
+- A system `tar` command. The current installer uses `tar` to extract the
+  binary, including on Windows.
+- Access to the configured GitHub Release download URL.
 
-## 安装
+## Installation
 
 ```bash
 npm install -g @mediaio/cli
 ```
 
-安装完成后：
+After installation:
 
 ```bash
 mediaio --help
@@ -43,56 +48,84 @@ mediaio auth login
 mediaio generate list
 ```
 
-CLI 同时提供 `mediaio` 与 `mi` 两个等价命令，二者调用同一 launcher、binary、配置和
-凭据。`mediaio` 是正式命令：所有文档、自动化脚本与排障指引均使用它；`mi` 仅作为终端
-输入的便捷别名。若用户机器已有同名 `mi` 命令发生 PATH 冲突，继续使用 `mediaio` 即可。
+The CLI exposes both `mediaio` and `mi` as equivalent commands. They use the
+same launcher, binary, configuration, and credentials. `mediaio` is the
+canonical command: all documentation, automation, and troubleshooting guidance
+should use it. `mi` is only a convenience alias for terminal input. If a user
+machine already has another `mi` command in `PATH`, continue using `mediaio`.
 
-## postinstall 做了什么
+## For Claude Code
 
-`npm install` 会执行：
+The `Claude Code` plugin in `media-plugin-main` depends on an executable
+`mediaio` command on the local machine. This npm package is one supported way to
+install that local runtime.
+
+Recommended verification flow:
+
+```bash
+npm install -g @mediaio/cli
+mediaio auth login
+mediaio version
+mediaio model list
+```
+
+If these commands work, you can then install the `Claude Code` plugin from
+`media-plugin-main`. The plugin itself does not silently install or repair the
+`mediaio` CLI for you.
+
+## What `postinstall` Does
+
+`npm install` runs:
 
 ```text
 node install.js
 ```
 
-当前安装流程：
+Current installation flow:
 
-1. 将 Node 平台映射为 binary 平台名：`darwin`、`linux`、`windows`。
-2. 将 Node 架构映射为 Go 架构名：`x64 → amd64`、`arm64 → arm64`。
-3. 读取 npm 包版本作为 binary 版本。
-4. 下载对应的 `.tar.gz` Release asset。
-5. 从压缩包根目录提取 `mediaio` 或 `mediaio.exe` 到 `vendor/`。
-6. Unix 平台为 binary 增加可执行权限。
-7. 写入 `vendor/install.json`，记录安装方式、包管理器、包名和版本。
+1. Map the Node platform to the binary platform name: `darwin`, `linux`,
+   `windows`.
+2. Map the Node architecture to the Go architecture name:
+   `x64 → amd64`, `arm64 → arm64`.
+3. Read the npm package version as the binary version.
+4. Download the matching `.tar.gz` release asset.
+5. Extract `mediaio` or `mediaio.exe` from the archive root into `vendor/`.
+6. Add executable permissions on Unix platforms.
+7. Write `vendor/install.json` with the install method, package manager,
+   package name, and version.
 
-当前下载规则：
+Current download rule:
 
 ```text
 https://github.com/media-io/cli/releases/download/v<version>/mediaio_<version>_<os>_<arch>.tar.gz
 ```
 
-例如 npm 包版本为 `1.0.3`、运行环境为 Apple Silicon macOS 时，会下载：
+For example, if the npm package version is `1.0.3` and the runtime environment
+is Apple Silicon macOS, the installer downloads:
 
 ```text
 https://github.com/media-io/cli/releases/download/v1.0.3/mediaio_1.0.3_darwin_arm64.tar.gz
 ```
 
-archive 根目录必须直接包含 `mediaio`；Windows archive 必须直接包含 `mediaio.exe`。
+The archive root must directly contain `mediaio`. On Windows, it must directly
+contain `mediaio.exe`.
 
-## launcher 行为
+## Launcher Behavior
 
-`bin/run.js` 启动 `vendor/mediaio` 或 `vendor/mediaio.exe`，并执行以下透传：
+`bin/run.js` starts `vendor/mediaio` or `vendor/mediaio.exe` and provides the
+following pass-through behavior:
 
-- 原样传递 CLI 参数。
-- `stdin`、`stdout`、`stderr` 使用 `inherit`。
-- 子进程被 signal 终止时，将 signal 传递给当前 Node 进程。
-- 正常退出时返回 Go binary 的 exit code。
-- 向 binary 注入 `mediaio_INSTALL_METHOD=npm`。
-- 向 binary 注入 `mediaio_PACKAGE_MANAGER=<npm|pnpm|yarn|bun>`。
+- Forward CLI arguments unchanged.
+- Use `inherit` for `stdin`, `stdout`, and `stderr`.
+- Forward termination signals from the child process back to the Node process.
+- Return the Go binary exit code on normal exit.
+- Inject `mediaio_INSTALL_METHOD=npm` into the binary environment.
+- Inject `mediaio_PACKAGE_MANAGER=<npm|pnpm|yarn|bun>` into the binary
+  environment.
 
-## 本地开发
+## Local Development
 
-只检查 JavaScript 语法，不触发 binary 下载：
+Validate JavaScript syntax only, without triggering a binary download:
 
 ```bash
 node --check install.js
@@ -101,15 +134,16 @@ node --check bin/run.js
 npm pack --dry-run
 ```
 
-使用相邻的 `media-plugin-bin` 本地构建产物联调：
+Use a locally built binary from the sibling `media-plugin-bin` repository for
+integration testing:
 
 ```bash
-# 先在 ../media-plugin-bin 中构建
+# Build first in ../media-plugin-bin
 cd ../media-plugin-bin
 mkdir -p dist
 go build -trimpath -o dist/mediaio .
 
-# 回到本仓库，跳过 postinstall 并放入本地 binary
+# Return to this repository, skip postinstall, and place the local binary
 cd ../media-plugin-cli
 npm install --ignore-scripts
 mkdir -p vendor
@@ -121,7 +155,7 @@ node bin/mi.js --help
 node bin/mediaio.js generate list
 ```
 
-Windows 请复制 `mediaio.exe`：
+On Windows, copy `mediaio.exe` instead:
 
 ```powershell
 New-Item -ItemType Directory -Force vendor
@@ -129,15 +163,16 @@ Copy-Item ..\media-plugin-bin\dist\mediaio.exe vendor\mediaio.exe
 node bin\mediaio.js --help
 ```
 
-## 发布
+## Release
 
-npm 包与 Go binary 当前使用同一个版本号，必须成套发布。
+The npm package and Go binary currently use the same version number and must be
+released together.
 
-1. 在 `media-plugin-bin` 中完成测试和多平台构建。
-2. 创建 `v<version>` Release，并上传对应的 binary archives。
-3. 确认每个 archive 的名称和根目录文件符合安装器约定。
-4. 将本仓库 `package.json.version` 设置为相同版本。
-5. 检查 npm 包内容并发布。
+1. Finish testing and multi-platform builds in `media-plugin-bin`.
+2. Create a `v<version>` release and upload the matching binary archives.
+3. Verify that each archive name and root file match the installer contract.
+4. Set this repository's `package.json.version` to the same version.
+5. Inspect the npm package contents and publish.
 
 ```bash
 npm pack --dry-run
@@ -145,14 +180,14 @@ npm pack
 npm publish --access public
 ```
 
-发布后应在干净环境验证：
+After release, validate in a clean environment:
 
 ```bash
 npm install -g @mediaio/cli@<version>
 mediaio --help
 ```
 
-v2 方案首期 binary matrix 为：
+The initial v2 binary matrix is:
 
 ```text
 darwin/amd64
@@ -162,59 +197,68 @@ linux/arm64
 windows/amd64
 ```
 
-注意：当前 `package.json` 的 `os` 与 `cpu` 字段、`install.js` 的映射逻辑也会允许
-`windows/arm64` 进入安装流程。正式发布前必须二选一：提供
-`mediaio_<version>_windows_arm64.tar.gz`，或收紧安装器/包元数据，避免用户安装后得到 404。
+Note: the current `package.json` `os` and `cpu` fields, together with the
+mapping logic in `install.js`, also allow `windows/arm64` to enter the install
+flow. Before public release, you must do one of the following:
 
-## 排障
+- provide `mediaio_<version>_windows_arm64.tar.gz`, or
+- tighten the installer and package metadata so users do not hit a 404 after
+  installation.
 
-### binary 不存在
+## Troubleshooting
 
-如果看到 `binary not found at .../vendor/mediaio`，说明 `postinstall` 未执行或执行失败。
+### Binary Missing
+
+If you see `binary not found at .../vendor/mediaio`, `postinstall` did not run
+or failed.
 
 ```bash
 npm uninstall -g @mediaio/cli
 npm install -g @mediaio/cli
 ```
 
-使用 `npm install --ignore-scripts` 安装时不会下载 binary；当前版本尚未提供独立的
-`mediaio install` 修复命令。
+If you install with `npm install --ignore-scripts`, the binary will not be
+downloaded. The current version does not yet provide a separate `mediaio install`
+repair command.
 
-### 下载返回 404
+### Download Returns 404
 
-检查以下三项是否完全一致：
+Check that all three of the following match exactly:
 
-- `package.json.version`；
-- GitHub Release tag `v<version>`；
-- asset 名称 `mediaio_<version>_<os>_<arch>.tar.gz`。
+- `package.json.version`
+- GitHub release tag `v<version>`
+- asset name `mediaio_<version>_<os>_<arch>.tar.gz`
 
-### 解压失败
+### Extraction Fails
 
-确认系统存在 `tar`，并确认 archive 根目录直接包含 `mediaio` 或 `mediaio.exe`。
+Make sure the system provides `tar`, and make sure the archive root directly
+contains `mediaio` or `mediaio.exe`.
 
-### 平台不支持
+### Unsupported Platform
 
-当前安装器只识别：
+The current installer recognizes only:
 
 ```text
 darwin | linux | windows
 amd64 | arm64
 ```
 
-Node 报告的其他 `process.platform` 或 `process.arch` 会直接终止安装。
+Any other `process.platform` or `process.arch` reported by Node causes the
+installation to fail immediately.
 
-## 当前实现与 v2 目标的差异
+## Current Implementation vs. v2 Target
 
-| 领域 | 当前实现 | v2 目标 |
+| Area | Current Implementation | v2 Target |
 |---|---|---|
-| npm 包名 | `@mediaio/cli` | `@mediaio/cli` |
-| 命令入口 | 仅 `mediaio` | 仅 `mediaio`，不提供缩写别名 |
-| 版本锁定 | npm version 直接拼接下载 URL | 独立 binary manifest 固定精确版本 |
-| 完整性校验 | 尚无 checksum/signature 校验 | SHA-256、签名和 binary version 校验 |
-| 下载安全 | 直接写目标 tarball，未配置 timeout | 随机临时文件、timeout、原子安装和统一清理 |
-| 平台识别 | OS/CPU；未识别 libc | Linux 明确 glibc/musl 策略 |
-| 安装修复 | 重新安装 npm 包 | 显式 install/repair/upgrade/offline 入口 |
-| metadata | 写入 `install.json`，launcher 损坏时降级 | metadata 与 binary 原子安装，损坏时明确失败 |
+| npm package name | `@mediaio/cli` | `@mediaio/cli` |
+| command entry | `mediaio` only | `mediaio` only, with no shorthand alias |
+| version locking | npm version is interpolated directly into the download URL | dedicated binary manifest pins the exact version |
+| integrity validation | no checksum or signature validation yet | SHA-256, signature, and binary version validation |
+| download safety | writes directly to the target tarball, no explicit timeout | random temp file, timeout, atomic install, and unified cleanup |
+| platform detection | OS and CPU only; no libc detection | explicit Linux glibc vs musl strategy |
+| install repair | reinstall the npm package | explicit install / repair / upgrade / offline entry points |
+| metadata | writes `install.json`, degrades if launcher metadata is damaged | metadata and binary installed atomically, with explicit failure on corruption |
 
-这些目标完成前，README 和发布说明应明确当前能力边界，不能声称安装器已经验证
-checksum、签名或 binary version。
+Until these targets are implemented, the README and release instructions must
+state the current capability boundaries clearly and must not claim that the
+installer already validates checksums, signatures, or binary versions.
