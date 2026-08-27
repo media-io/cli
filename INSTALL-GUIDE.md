@@ -6,7 +6,7 @@ Set up or update Media.io so I can generate images and videos from here.
 2. Check `mediaio whoami`. If it shows I'm signed in, skip login. If not, run `mediaio auth login` and let me complete the sign-in in the browser it opens.
 3. Install or update the companion plugin: run `codex plugin marketplace add media-io/plugin`.
 
-If any install, update, or sign-in step fails, read https://github.com/media-io/cli/blob/main/INSTALL-HELP.md and follow it to diagnose and fix the problem automatically. Only ask me for the steps you can't do yourself, like browser sign-in or granting permissions.
+If any install, update, or sign-in step fails, read the Troubleshooting section below and follow it to diagnose and fix the problem automatically. Only ask me for the steps you can't do yourself, like browser sign-in or granting permissions.
 
 Once that's done, let me know when it's ready.
 
