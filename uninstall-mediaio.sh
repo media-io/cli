@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 step_index=0
 failures=()
 warnings=()
-removed_by_cli=0
-removed_from_marketplace=0
+MediaIoInstallDir="${MEDIAIO_INSTALL_DIR:-$HOME/.local/bin}"
+MediaIoCodexMarketplaceName="${MEDIAIO_CODEX_MARKETPLACE_NAME:-media-io}"
+claude_available=0
+codex_available=0
 
 write_step() {
   step_index=$((step_index + 1))
@@ -22,6 +26,10 @@ add_warning() {
   printf '  WARN: %s\n' "$1"
 }
 
+require_command() {
+  command -v "$1" >/dev/null 2>&1
+}
+
 run_checked_step() {
   local label="$1"
   local action="$2"
@@ -30,13 +38,13 @@ run_checked_step() {
 
   write_step "$label"
 
-  if ! "$action"; then
+  if ! eval "$action"; then
     add_failure "$label - command failed"
     return 0
   fi
 
   if [[ -n "$verify" ]]; then
-    if ! "$verify"; then
+    if ! eval "$verify"; then
       add_failure "$label - verification failed"
       return 0
     fi
@@ -49,48 +57,71 @@ run_checked_step() {
   fi
 }
 
-require_command() {
-  command -v "$1" >/dev/null 2>&1
+check_optional_host() {
+  local label="$1"
+  local command_name="$2"
+  local var_name="$3"
+
+  write_step "$label"
+  if require_command "$command_name"; then
+    printf '  OK: %s is available\n' "$command_name"
+    printf -v "$var_name" '%s' 1
+  else
+    add_warning "$command_name is not available; skipping host-specific removal steps."
+    printf -v "$var_name" '%s' 0
+  fi
 }
 
-preflight_npm() { require_command npm; }
-preflight_npx() { require_command npx; }
-preflight_codex() { require_command codex; }
+get_mediaio_plugin_source_candidates() {
+  local candidates=()
+  candidates+=(
+    "$SCRIPT_ROOT/../media-plugin-main"
+    "$SCRIPT_ROOT/../plugins/media-io"
+    "$HOME/.codex/.tmp/marketplaces/media-io"
+  )
 
-uninstall_mediaio_cli() { npm uninstall -g @mediaio/cli; }
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -f "$candidate/.codex-plugin/plugin.json" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
 
-get_npm_global_root() {
-  npm root -g
+  return 1
 }
 
-get_npm_global_bin_dir() {
-  npm prefix -g
+get_mediaio_plugin_source_root() {
+  get_mediaio_plugin_source_candidates
 }
 
-verify_mediaio_package_removed() {
-  local package_dir
-  package_dir="$(get_npm_global_root)/@mediaio/cli"
-  [[ ! -e "$package_dir" ]]
+get_mediaio_plugin_version() {
+  local manifest_path
+  manifest_path="$(get_mediaio_plugin_source_root)/.codex-plugin/plugin.json"
+  node -e '
+    const fs = require("fs");
+    const path = process.argv[1];
+    if (!fs.existsSync(path)) process.exit(2);
+    const manifest = JSON.parse(fs.readFileSync(path, "utf8"));
+    if (!manifest.version) process.exit(3);
+    process.stdout.write(String(manifest.version));
+  ' "$manifest_path"
 }
 
-warn_if_mediaio_still_on_path() {
-  local mediaio_path npm_bin_dir
-  mediaio_path="$(command -v mediaio || true)"
-  if [[ -z "$mediaio_path" ]]; then
+get_mediaio_codex_marketplace_name() {
+  printf '%s\n' "$MediaIoCodexMarketplaceName"
+}
+
+remove_path_if_present() {
+  local path="$1"
+
+  if [[ -e "$path" ]]; then
+    rm -rf "$path"
+    printf '  OK: removed %s\n' "$path"
     return 0
   fi
 
-  npm_bin_dir="$(get_npm_global_bin_dir)/bin"
-  case "$mediaio_path" in
-    "$npm_bin_dir"/*)
-      add_warning "mediaio still resolves from the npm global bin directory: $mediaio_path"
-      ;;
-    *)
-      add_warning "mediaio still resolves from PATH, but not from this npm install: $mediaio_path"
-      ;;
-  esac
-
-  return 0
+  return 1
 }
 
 get_personal_marketplace_path() {
@@ -126,25 +157,253 @@ write_json_no_bom() {
   printf '%s\n' "$json" >"$path"
 }
 
-remove_codex_plugin() {
-  local marketplace_name target
-  marketplace_name="$(get_personal_marketplace_name)"
-  local cli_removed=0
+remove_personal_marketplace_entry() {
+  local marketplace_path payload updated
+  marketplace_path="$(get_personal_marketplace_path)"
 
-  removed_by_cli=0
-  for target in "media-io@$marketplace_name" "media-io@media-io"; do
-    if codex plugin remove "$target"; then
-      removed_by_cli=1
-      cli_removed=1
-      printf '  OK: codex plugin remove %s\n' "$target"
-      break
-    fi
-    add_warning "codex plugin remove $target failed"
+  [[ -f "$marketplace_path" ]] || return 1
+
+  payload="$(node -e '
+    const fs = require("fs");
+    const path = process.argv[1];
+    process.stdout.write(fs.readFileSync(path, "utf8"));
+  ' "$marketplace_path")"
+
+  updated="$(node -e '
+    try {
+      const payload = JSON.parse(process.argv[1]);
+      if (!Array.isArray(payload.plugins)) process.exit(2);
+      const before = payload.plugins.length;
+      payload.plugins = payload.plugins.filter((entry) => entry && entry.name !== "media-io");
+      if (payload.plugins.length === before) process.exit(3);
+      payload.interface = payload.interface || {};
+      if (!String(payload.name || "").trim()) payload.name = "personal";
+      if (!String(payload.interface.displayName || "").trim()) payload.interface.displayName = "Personal";
+      process.stdout.write(JSON.stringify(payload));
+    } catch {
+      process.exit(4);
+    }
+  ' "$payload")" || return 1
+
+  write_json_no_bom "$marketplace_path" "$updated"
+}
+
+get_codex_plugin_cache_roots() {
+  local version marketplace cache_root
+  version="$(get_mediaio_plugin_version)"
+  marketplace="$(get_personal_marketplace_name)"
+  for cache_root in \
+    "$HOME/.codex/plugins/cache/$marketplace/media-io/$version" \
+    "$HOME/.codex/plugins/cache/$marketplace/media-io" \
+    "$HOME/.codex/plugins/cache/$MediaIoCodexMarketplaceName/media-io/$version" \
+    "$HOME/.codex/plugins/cache/$MediaIoCodexMarketplaceName/media-io" \
+    "$HOME/.codex/plugins/cache/media-io/media-io/$version" \
+    "$HOME/.codex/plugins/cache/media-io/media-io" \
+    "$HOME/.codex/plugins/cache/personal/media-io/$version" \
+    "$HOME/.codex/plugins/cache/personal/media-io"
+  do
+    printf '%s\n' "$cache_root"
   done
 
-  removed_from_marketplace=0
+  if [[ -d "$HOME/.codex/plugins/cache" ]]; then
+    while IFS= read -r dir; do
+      [[ -n "$dir" ]] || continue
+      printf '%s\n' "$dir/$MediaIoCodexMarketplaceName/media-io"
+      printf '%s\n' "$dir/media-io"
+    done < <(find "$HOME/.codex/plugins/cache" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+  fi
+}
+
+get_claude_plugin_cache_roots() {
+  local version cache_root
+  version="$(get_mediaio_plugin_version)"
+  for cache_root in \
+    "$HOME/.claude/plugins/cache/media-io/media-io/$version" \
+    "$HOME/.claude/plugins/cache/media-io/media-io"
+  do
+    printf '%s\n' "$cache_root"
+  done
+
+  if [[ -d "$HOME/.claude/plugins/cache" ]]; then
+    while IFS= read -r dir; do
+      [[ -n "$dir" ]] || continue
+      printf '%s\n' "$dir/media-io"
+    done < <(find "$HOME/.claude/plugins/cache" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+  fi
+}
+
+remove_codex_plugin_caches() {
+  local cache_root
+  while IFS= read -r cache_root; do
+    [[ -n "$cache_root" ]] || continue
+    remove_path_if_present "$cache_root" >/dev/null || true
+  done < <(get_codex_plugin_cache_roots)
+}
+
+remove_claude_plugin_caches() {
+  local cache_root
+  while IFS= read -r cache_root; do
+    [[ -n "$cache_root" ]] || continue
+    remove_path_if_present "$cache_root" >/dev/null || true
+  done < <(get_claude_plugin_cache_roots)
+}
+
+remove_skill_directories() {
+  local skill_root
+  for skill_root in \
+    "$HOME/.agents/skills/mediaio-generate" \
+    "$HOME/.agents/skills/mediaio-install" \
+    "$HOME/.claude/skills/mediaio-generate" \
+    "$HOME/.claude/skills/mediaio-install" \
+    "$HOME/.codex/skills/mediaio-generate" \
+    "$HOME/.codex/skills/mediaio-install"
+  do
+    if [[ -d "$skill_root" ]]; then
+      rm -rf "$skill_root"
+      printf '  OK: removed skill directory %s\n' "$skill_root"
+    fi
+  done
+}
+
+test_skill_directories_absent() {
+  local skill_root
+  for skill_root in \
+    "$HOME/.agents/skills/mediaio-generate" \
+    "$HOME/.agents/skills/mediaio-install" \
+    "$HOME/.claude/skills/mediaio-generate" \
+    "$HOME/.claude/skills/mediaio-install" \
+    "$HOME/.codex/skills/mediaio-generate" \
+    "$HOME/.codex/skills/mediaio-install"
+  do
+    if [[ -d "$skill_root" ]]; then
+      return 1
+    fi
+  done
+
+  return 0
+}
+
+test_codex_plugin_cache_present() {
+  local cache_root
+  while IFS= read -r cache_root; do
+    [[ -n "$cache_root" ]] || continue
+    if [[ -d "$cache_root" ]]; then
+      return 0
+    fi
+  done < <(get_codex_plugin_cache_roots)
+
+  return 1
+}
+
+test_claude_plugin_cache_present() {
+  local cache_root
+  while IFS= read -r cache_root; do
+    [[ -n "$cache_root" ]] || continue
+    if [[ -d "$cache_root" ]]; then
+      return 0
+    fi
+  done < <(get_claude_plugin_cache_roots)
+
+  return 1
+}
+
+verify_mediaio_package_removed() {
+  local package_dir
+  package_dir="$(npm root -g)/@mediaio/cli"
+  [[ ! -e "$package_dir" ]]
+}
+
+warn_if_mediaio_still_on_path() {
+  local mediaio_path npm_bin_dir
+  mediaio_path="$(command -v mediaio || true)"
+  if [[ -z "$mediaio_path" ]]; then
+    return 0
+  fi
+
+  npm_bin_dir="$(npm prefix -g)/bin"
+  case "$mediaio_path" in
+    "$npm_bin_dir"/*)
+      add_warning "mediaio still resolves from the npm global bin directory: $mediaio_path"
+      ;;
+    *)
+      add_warning "mediaio still resolves from PATH, but not from this npm install: $mediaio_path"
+      ;;
+  esac
+
+  return 0
+}
+
+remove_mediaio_cli() {
+  if require_command npm; then
+    npm uninstall -g @mediaio/cli
+  fi
+
+  local release_bin
+  for release_bin in "$MediaIoInstallDir/mediaio" "$MediaIoInstallDir/mediaio.exe"; do
+    if [[ -e "$release_bin" ]]; then
+      rm -f "$release_bin"
+      printf '  OK: removed %s\n' "$release_bin"
+    fi
+  done
+}
+
+remove_claude_plugin() {
+  local removed=0 raw=""
+
+  if ! test_claude_plugin_cache_present; then
+    printf '  OK: Claude Code plugin already absent\n'
+    remove_claude_plugin_caches
+    return 0
+  fi
+
+  if require_command claude; then
+    raw="$(claude plugin uninstall media-io@media-io -s user -y 2>&1)" && {
+      removed=1
+      printf '  OK: claude plugin uninstall media-io@media-io -s user -y\n'
+    } || {
+      if [[ "$raw" == *'Plugin "media-io@media-io" not found in installed plugins'* ]]; then
+        printf '  OK: Claude Code plugin already absent\n'
+      else
+        add_warning "claude plugin uninstall media-io@media-io failed: $raw"
+      fi
+    }
+  else
+    add_warning "claude is not available; removing cached files only."
+  fi
+
+  remove_claude_plugin_caches
+
+  if [[ $removed -eq 0 ]]; then
+    return 0
+  fi
+}
+
+remove_codex_plugin() {
+  local marketplace_name target removed=0 raw=""
+  marketplace_name="$(get_personal_marketplace_name)"
+
+  if ! test_codex_plugin_cache_present; then
+    printf '  OK: Codex plugin already absent\n'
+  fi
+
+  if require_command codex; then
+    for target in "media-io@$marketplace_name" "media-io@media-io"; do
+      raw="$(codex plugin remove "$target" 2>&1)" && {
+        removed=1
+        printf '  OK: codex plugin remove %s\n' "$target"
+        break
+      } || {
+        if [[ "$raw" == *'not found in installed plugins'* ]]; then
+          continue
+        fi
+        add_warning "codex plugin remove $target failed: $raw"
+      }
+    done
+  else
+    add_warning "codex is not available; removing cached files only."
+  fi
+
   if remove_personal_marketplace_entry; then
-    removed_from_marketplace=1
     printf '  OK: removed media-io from personal marketplace file\n'
   elif [[ -f "$(get_personal_marketplace_path)" ]]; then
     add_warning "No media-io entry was found in the personal marketplace file."
@@ -154,12 +413,8 @@ remove_codex_plugin() {
 
   remove_codex_plugin_caches
 
-  if [[ $removed_by_cli -eq 0 && $removed_from_marketplace -eq 0 ]] && ! test_codex_plugin_cache_present; then
-    add_warning "Codex did not report removing media-io, but the plugin cache was cleared."
-  fi
-
-  if [[ $cli_removed -eq 0 ]]; then
-    return 1
+  if [[ $removed -eq 0 ]]; then
+    return 0
   fi
 }
 
@@ -181,6 +436,10 @@ verify_codex_plugin_removed() {
   fi
 }
 
+verify_claude_plugin_removed() {
+  ! test_claude_plugin_cache_present
+}
+
 verify_final_state() {
   if verify_mediaio_package_removed; then
     printf '  OK: @mediaio/cli is absent from the npm global root\n'
@@ -189,13 +448,15 @@ verify_final_state() {
   fi
 
   if test_codex_plugin_cache_present; then
-    add_failure "Final verification - Media.io plugin cache is still present."
-    return 0
+    add_failure "Final verification - Media.io Codex plugin cache is still present."
+  fi
+
+  if test_claude_plugin_cache_present; then
+    add_failure "Final verification - Media.io Claude Code plugin cache is still present."
   fi
 
   if ! test_skill_directories_absent; then
-    add_failure "Final verification - Media.io skill directories are still present."
-    return 0
+    add_failure "Final verification - some Media.io skill directories are still present."
   fi
 
   local marketplace_path
@@ -209,106 +470,35 @@ verify_final_state() {
       if (names.includes("media-io")) process.exit(1);
     ' "$marketplace_path"
   fi
-  printf '  OK: media-io is absent from Codex cache and personal marketplace\n'
-}
-
-remove_personal_marketplace_entry() {
-  local marketplace_path payload updated
-  marketplace_path="$(get_personal_marketplace_path)"
-
-  [[ -f "$marketplace_path" ]] || return 1
-
-  payload="$(node -e '
-    const fs = require("fs");
-    const path = process.argv[1];
-    process.stdout.write(fs.readFileSync(path, "utf8"));
-  ' "$marketplace_path")"
-
-  updated="$(node -e '
-    const payload = JSON.parse(process.argv[1]);
-    if (!Array.isArray(payload.plugins)) process.exit(2);
-    const before = payload.plugins.length;
-    payload.plugins = payload.plugins.filter((entry) => entry && entry.name !== "media-io");
-    if (payload.plugins.length === before) process.exit(3);
-    payload.interface = payload.interface || {};
-    if (!String(payload.name || "").trim()) payload.name = "personal";
-    if (!String(payload.interface.displayName || "").trim()) payload.interface.displayName = "Personal";
-    process.stdout.write(JSON.stringify(payload));
-  ' "$payload")" || return 1
-
-  write_json_no_bom "$marketplace_path" "$updated"
-}
-
-remove_codex_plugin_caches() {
-  local cache_root
-  for cache_root in \
-    "$HOME/.codex/plugins/cache/personal/media-io" \
-    "$HOME/.codex/plugins/cache/media-io/media-io"
-  do
-    if [[ -d "$cache_root" ]]; then
-      rm -rf "$cache_root"
-      printf '  OK: removed plugin cache %s\n' "$cache_root"
-    fi
-  done
-}
-
-remove_skill_directories() {
-  local skill_root
-  for skill_root in \
-    "$HOME/.agents/skills/mediaio-generate" \
-    "$HOME/.agents/skills/mediaio-install" \
-    "$HOME/.codex/skills/mediaio-generate" \
-    "$HOME/.codex/skills/mediaio-install"
-  do
-    if [[ -d "$skill_root" ]]; then
-      rm -rf "$skill_root"
-      printf '  OK: removed skill directory %s\n' "$skill_root"
-    fi
-  done
-}
-
-test_skill_directories_absent() {
-  local skill_root
-  for skill_root in \
-    "$HOME/.agents/skills/mediaio-generate" \
-    "$HOME/.agents/skills/mediaio-install" \
-    "$HOME/.codex/skills/mediaio-generate" \
-    "$HOME/.codex/skills/mediaio-install"
-  do
-    if [[ -d "$skill_root" ]]; then
-      return 1
-    fi
-  done
-
-  return 0
-}
-
-test_codex_plugin_cache_present() {
-  local cache_root
-  for cache_root in \
-    "$HOME/.codex/plugins/cache/personal/media-io" \
-    "$HOME/.codex/plugins/cache/media-io/media-io"
-  do
-    if [[ -d "$cache_root" ]]; then
-      return 0
-    fi
-  done
-
-  return 1
+  printf '  OK: requested Media.io uninstall targets are absent\n'
 }
 
 printf '%s\n' "Media.io uninstall script"
-printf '%s\n' "This script removes the Media.io CLI, Codex plugin, and Media.io skills with checks after each step."
+printf '%s\n' "This script removes the Media.io CLI, Claude/Codex plugin state, and Media.io skills with checks after each step."
 
-run_checked_step "Preflight: locate npm" preflight_npm "" "npm is available"
-run_checked_step "Preflight: locate npx" preflight_npx "" "npx is available"
-run_checked_step "Preflight: locate codex" preflight_codex "" "codex is available"
+check_optional_host "Preflight: locate claude" claude claude_available
+check_optional_host "Preflight: locate codex" codex codex_available
+run_checked_step "Preflight: locate npm" "require_command npm" "" "npm is available"
+run_checked_step "Preflight: locate npx" "require_command npx" "" "npx is available"
 
-run_checked_step "Uninstall Media.io CLI" uninstall_mediaio_cli verify_mediaio_package_removed "Media.io CLI removed"
+run_checked_step "Uninstall Media.io CLI" "remove_mediaio_cli" "verify_mediaio_package_removed" "Media.io CLI removed"
 warn_if_mediaio_still_on_path
 
-run_checked_step "Remove Codex plugin" remove_codex_plugin verify_codex_plugin_removed "Codex plugin removed"
-run_checked_step "Remove Media.io skills" remove_skill_directories test_skill_directories_absent "Media.io skills removed"
+if [[ "$claude_available" -eq 1 ]]; then
+  run_checked_step "Remove Claude Code plugin" "remove_claude_plugin" "verify_claude_plugin_removed" "Claude Code plugin removed"
+else
+  write_step "Remove Claude Code plugin"
+  remove_claude_plugin
+fi
+
+if [[ "$codex_available" -eq 1 ]]; then
+  run_checked_step "Remove Codex plugin" "remove_codex_plugin" "verify_codex_plugin_removed" "Codex plugin removed"
+else
+  write_step "Remove Codex plugin"
+  remove_codex_plugin
+fi
+
+run_checked_step "Remove Media.io skills" "remove_skill_directories" "test_skill_directories_absent" "Media.io skills removed"
 
 write_step "Final verification"
 verify_final_state

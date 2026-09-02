@@ -33,6 +33,54 @@ function Add-Warning {
   Write-Host "  WARN: $Message" -ForegroundColor Yellow
 }
 
+function Get-UserEnvironmentPathValue {
+  $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $false)
+  if ($null -eq $key) { return "" }
+  try {
+    $value = $key.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    return [string]$value
+  } finally {
+    $key.Close()
+  }
+}
+
+function Set-UserEnvironmentPathValue {
+  param([Parameter(Mandatory = $true)][string]$Value)
+
+  $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("Environment")
+  if ($null -eq $key) {
+    throw "Could not open HKCU\Environment for writing."
+  }
+
+  try {
+    $key.SetValue("Path", $Value, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+  } finally {
+    $key.Close()
+  }
+}
+
+function Broadcast-EnvironmentChange {
+  if (-not ("User32.NativeMethods" -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+namespace User32 {
+  public static class NativeMethods {
+    [DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern IntPtr SendMessageTimeout(IntPtr hWnd, int Msg, IntPtr wParam, string lParam, int flags, int timeout, out IntPtr result);
+  }
+}
+"@
+  }
+
+  $HWND_BROADCAST = [IntPtr]0xffff
+  $WM_SETTINGCHANGE = 0x001A
+  $SMTO_ABORTIFHUNG = 0x0002
+  $result = [IntPtr]::Zero
+  [void][User32.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [IntPtr]::Zero, "Environment", $SMTO_ABORTIFHUNG, 5000, [ref]$result)
+}
+
 function Test-CommandAvailable {
   param([Parameter(Mandatory = $true)][string]$Name)
   return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
@@ -133,6 +181,19 @@ function Remove-PathIfPresent {
   return $false
 }
 
+function Remove-EmptyDirectoryIfPresent {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  if (-not (Test-Path $Path)) { return $false }
+
+  $children = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)
+  if ($children.Count -gt 0) { return $false }
+
+  Remove-Item -LiteralPath $Path -Force
+  Write-Host "  OK: removed empty directory $Path" -ForegroundColor Green
+  return $true
+}
+
 function Get-PersonalMarketplacePath {
   return Join-Path $env:USERPROFILE ".agents\plugins\marketplace.json"
 }
@@ -218,6 +279,13 @@ function Get-CodexPluginCacheRoots {
   })
 }
 
+function Get-CodexPluginCacheNamespaceRoots {
+  $cacheRoot = Join-Path $env:USERPROFILE ".codex\plugins\cache"
+  return @(
+    (Join-Path $cacheRoot "media-io")
+  )
+}
+
 function Get-CodexMarketplaceRoots {
   $roots = New-Object System.Collections.Generic.List[string]
   $tmpMarketplaceRoot = Join-Path $env:USERPROFILE ".codex\.tmp\marketplaces"
@@ -249,9 +317,20 @@ function Get-ClaudePluginCacheRoots {
   })
 }
 
+function Get-ClaudePluginCacheNamespaceRoots {
+  $cacheRoot = Join-Path $env:USERPROFILE ".claude\plugins\cache"
+  return @(
+    (Join-Path $cacheRoot "media-io")
+  )
+}
+
 function Remove-CodexPluginCaches {
   foreach ($cacheRoot in Get-CodexPluginCacheRoots) {
     [void](Remove-PathIfPresent -Path $cacheRoot)
+  }
+
+  foreach ($namespaceRoot in Get-CodexPluginCacheNamespaceRoots) {
+    [void](Remove-EmptyDirectoryIfPresent -Path $namespaceRoot)
   }
 }
 
@@ -288,11 +367,18 @@ function Remove-ClaudePluginCaches {
   foreach ($cacheRoot in Get-ClaudePluginCacheRoots) {
     [void](Remove-PathIfPresent -Path $cacheRoot)
   }
+
+  foreach ($namespaceRoot in Get-ClaudePluginCacheNamespaceRoots) {
+    [void](Remove-EmptyDirectoryIfPresent -Path $namespaceRoot)
+  }
 }
 
 function Test-CodexPluginCachePresent {
   foreach ($cacheRoot in Get-CodexPluginCacheRoots) {
     if (Test-Path $cacheRoot) { return $true }
+  }
+  foreach ($namespaceRoot in Get-CodexPluginCacheNamespaceRoots) {
+    if (Test-Path $namespaceRoot) { return $true }
   }
   return $false
 }
@@ -307,6 +393,9 @@ function Test-CodexMarketplacePresent {
 function Test-ClaudePluginCachePresent {
   foreach ($cacheRoot in Get-ClaudePluginCacheRoots) {
     if (Test-Path $cacheRoot) { return $true }
+  }
+  foreach ($namespaceRoot in Get-ClaudePluginCacheNamespaceRoots) {
+    if (Test-Path $namespaceRoot) { return $true }
   }
   return $false
 }
