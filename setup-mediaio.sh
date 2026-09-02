@@ -11,9 +11,15 @@ MediaIoInstallDir="${MEDIAIO_INSTALL_DIR:-$HOME/.local/bin}"
 MediaIoNpmRegistry="${MEDIAIO_NPM_REGISTRY:-https://registry.npmjs.org}"
 MediaIoReleaseRepo="${MEDIAIO_RELEASE_REPO:-media-io/cli}"
 MediaIoReleaseBaseUrl="${MEDIAIO_RELEASE_BASE_URL:-https://github.com/$MediaIoReleaseRepo/releases/download}"
+MediaIoReleaseApiUrl="${MEDIAIO_RELEASE_API_URL:-https://api.github.com/repos/$MediaIoReleaseRepo/releases/latest}"
 MediaIoVersion="${MEDIAIO_VERSION:-latest}"
 MediaIoBinaryUrl="${MEDIAIO_BINARY_URL:-}"
 MediaIoChecksumUrl="${MEDIAIO_CHECKSUM_URL:-}"
+MediaIoNodeInstallRoot="${MEDIAIO_NODE_INSTALL_DIR:-$HOME/.local/share/mediaio/node}"
+MediaIoNodeCurrentDir="$MediaIoNodeInstallRoot/current"
+MediaIoNodeBinDir="$MediaIoNodeCurrentDir/bin"
+MediaIoNpmBinDir=""
+MediaIoNodeReady=0
 claude_available=0
 codex_available=0
 claude_plugin_installed=0
@@ -40,7 +46,7 @@ require_command() {
   command -v "$1" >/dev/null 2>&1
 }
 
-run_checked_step() {
+invoke_checked_step() {
   local label="$1"
   local action="$2"
   local verify="${3:-}"
@@ -76,6 +82,77 @@ run_checked_step() {
   fi
 }
 
+invoke_soft_step() {
+  local label="$1"
+  local action="$2"
+  local success_message="${3:-}"
+  local status=0
+
+  write_step "$label"
+
+  set +e
+  eval "$action"
+  status=$?
+  set -e
+  if [[ $status -ne 0 ]]; then
+    add_warning "$label failed."
+    return 1
+  fi
+
+  if [[ -n "$success_message" ]]; then
+    printf '  OK: %s\n' "$success_message"
+  else
+    printf '  OK\n'
+  fi
+  return 0
+}
+
+invoke_optional_fallback_step() {
+  local label="$1"
+  local primary="$2"
+  local fallback="$3"
+  local verify="${4:-}"
+  local success_message="${5:-}"
+  local status=0
+
+  write_step "$label"
+
+  set +e
+  eval "$primary"
+  status=$?
+  set -e
+  if [[ $status -ne 0 ]]; then
+    add_warning "$label primary path failed."
+    printf '  Trying fallback path...\n'
+    set +e
+    eval "$fallback"
+    status=$?
+    set -e
+    if [[ $status -ne 0 ]]; then
+      add_failure "$label fallback failed"
+      return 1
+    fi
+  fi
+
+  if [[ -n "$verify" ]]; then
+    set +e
+    eval "$verify"
+    status=$?
+    set -e
+    if [[ $status -ne 0 ]]; then
+      add_failure "$label verification failed"
+      return 1
+    fi
+  fi
+
+  if [[ -n "$success_message" ]]; then
+    printf '  OK: %s\n' "$success_message"
+  else
+    printf '  OK\n'
+  fi
+  return 0
+}
+
 check_optional_host() {
   local label="$1"
   local command_name="$2"
@@ -92,21 +169,91 @@ check_optional_host() {
 }
 
 ensure_node_and_npm() {
-  if ! require_command node || ! require_command npm || ! require_command npx || ! require_command curl || ! require_command tar; then
+  if require_command node && require_command npm && require_command npx; then
+    MediaIoNodeReady=1
+    node -v
+    npm -v
+    npx --version
+    return 0
+  fi
+
+  if ! require_command curl || ! require_command tar; then
+    MediaIoNodeReady=0
     return 1
   fi
 
-  node -v
-  npm -v
-  npx --version
-  curl --version >/dev/null 2>&1
-  tar --version >/dev/null 2>&1
+  if install_nodejs_from_official_tarball && require_command node && require_command npm && require_command npx; then
+    MediaIoNodeReady=1
+    node -v
+    npm -v
+    npx --version
+    return 0
+  fi
+
+  MediaIoNodeReady=0
+  return 1
+}
+
+append_path_export_if_missing() {
+  local shell_rc="$1"
+  local path_dir="$2"
+  local export_line="export PATH=\"$path_dir:\$PATH\""
+
+  [[ -n "$shell_rc" ]] || return 0
+  [[ -f "$shell_rc" ]] || touch "$shell_rc"
+  grep -Fqx "$export_line" "$shell_rc" 2>/dev/null && return 0
+  printf '\n%s\n' "$export_line" >>"$shell_rc"
+}
+
+persist_path_dir_in_shells() {
+  local path_dir="$1"
+  local updated=0
+  case ":$PATH:" in
+    *":$path_dir:"*) ;;
+    *) PATH="$path_dir:$PATH" ;;
+  esac
+
+  if [[ -n "${ZSH_VERSION:-}" ]] && [[ -n "${HOME:-}" ]]; then
+    append_path_export_if_missing "$HOME/.zshrc" "$path_dir"
+    updated=1
+  fi
+
+  if [[ -n "${BASH_VERSION:-}" ]] && [[ -n "${HOME:-}" ]]; then
+    append_path_export_if_missing "$HOME/.bashrc" "$path_dir"
+    append_path_export_if_missing "$HOME/.bash_profile" "$path_dir"
+    updated=1
+  fi
+
+  if [[ $updated -eq 0 ]] && [[ -n "${HOME:-}" ]]; then
+    append_path_export_if_missing "$HOME/.profile" "$path_dir"
+  fi
+}
+
+persist_mediaio_install_dir_path() {
+  persist_path_dir_in_shells "$MediaIoInstallDir"
+}
+
+get_npm_global_bin_dir() {
+  npm prefix -g
+}
+
+persist_npm_global_bin_dir_path() {
+  local npm_bin_dir="$1"
+  [[ -n "$npm_bin_dir" ]] || return 0
+  persist_path_dir_in_shells "$npm_bin_dir"
+}
+
+persist_node_bin_dir_path() {
+  persist_path_dir_in_shells "$MediaIoNodeBinDir"
 }
 
 get_mediaio_arch() {
-  if [[ -n "${MEDIAIO_ARCH:-}" ]]; then
-    case "${MEDIAIO_ARCH,,}" in
-      amd64|arm64) printf '%s\n' "${MEDIAIO_ARCH,,}"; return 0 ;;
+  local mediaio_arch
+  mediaio_arch="${MEDIAIO_ARCH:-}"
+  if [[ -n "$mediaio_arch" ]]; then
+    mediaio_arch="$(printf '%s' "$mediaio_arch" | tr '[:upper:]' '[:lower:]')"
+    case "$mediaio_arch" in
+      amd64|arm64) printf '%s\n' "$mediaio_arch"; return 0 ;;
       *) echo "Invalid MEDIAIO_ARCH value '$MEDIAIO_ARCH'. Must be 'amd64' or 'arm64'." >&2; return 1 ;;
     esac
   fi
@@ -118,22 +265,76 @@ get_mediaio_arch() {
   esac
 }
 
-resolve_mediaio_version_from_npm() {
+get_node_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) printf '%s\n' x64 ;;
+    arm64|aarch64) printf '%s\n' arm64 ;;
+    *) echo "Unsupported architecture. Set MEDIAIO_ARCH or use a supported macOS CPU." >&2; return 1 ;;
+  esac
+}
+
+get_node_lts_version() {
+  local index_line version
+  index_line="$(curl -fsSL https://nodejs.org/dist/index.json | grep '"lts":' | head -n 1 || true)"
+  version="$(printf '%s\n' "$index_line" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n 1)"
+  [[ -n "$version" ]] || return 1
+  printf '%s\n' "$version"
+}
+
+install_nodejs_from_official_tarball() {
+  local node_version node_arch download_url temp_dir archive_path extract_root source_dir
+  node_version="$(get_node_lts_version)" || return 1
+  node_arch="$(get_node_arch)" || return 1
+  download_url="https://nodejs.org/dist/$node_version/node-$node_version-darwin-$node_arch.tar.gz"
+
+  temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/mediaio-node.XXXXXX")"
+  archive_path="$temp_dir/node.tar.gz"
+  extract_root="$temp_dir/extract"
+
+  printf '  Downloading Node.js from %s\n' "$download_url"
+  if ! curl -fsSL "$download_url" -o "$archive_path"; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+
+  mkdir -p "$extract_root"
+  if ! tar -xzf "$archive_path" -C "$extract_root"; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+
+  source_dir="$(find "$extract_root" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+  if [[ -z "$source_dir" ]]; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+
+  mkdir -p "$MediaIoNodeInstallRoot"
+  rm -rf "$MediaIoNodeCurrentDir"
+  if ! cp -R "$source_dir" "$MediaIoNodeCurrentDir"; then
+    rm -rf "$temp_dir"
+    return 1
+  fi
+
+  persist_node_bin_dir_path
+  rm -rf "$temp_dir"
+  printf '  OK: Node.js is installed\n'
+}
+
+resolve_mediaio_version_from_github_latest() {
   if [[ "$MediaIoVersion" != latest ]]; then
     printf '%s\n' "$MediaIoVersion"
     return 0
   fi
 
-  local version
-  version="$(npm view "$MediaIoPackageName" version --json 2>/dev/null || true)"
-  version="${version%$'\n'}"
-  version="${version%\"}"
-  version="${version#\"}"
-  if [[ -z "$version" ]]; then
+  local release_json tag_name
+  release_json="$(curl -fsSL -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$MediaIoReleaseApiUrl")" || return 1
+  tag_name="$(printf '%s\n' "$release_json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  if [[ -z "$tag_name" ]]; then
     return 1
   fi
 
-  MediaIoVersion="$version"
+  MediaIoVersion="${tag_name#v}"
   printf '%s\n' "$MediaIoVersion"
 }
 
@@ -193,7 +394,7 @@ assert_mediaio_checksum_if_available() {
 
 install_mediaio_cli_from_release() {
   local release_version archive_name download_url temp_dir asset_name asset_path extract_root source_bin dest_bin staged_bin
-  if ! release_version="$(resolve_mediaio_version_from_npm)"; then
+  if ! release_version="$(resolve_mediaio_version_from_github_latest)"; then
     return 1
   fi
   MediaIoVersion="$release_version"
@@ -228,12 +429,26 @@ install_mediaio_cli_from_release() {
   cp "$source_bin" "$staged_bin"
   mv -f "$staged_bin" "$dest_bin"
   chmod +x "$dest_bin"
+  persist_mediaio_install_dir_path
   rm -rf "$temp_dir"
   printf '  OK: Media.io CLI is installed\n'
 }
 
 install_mediaio_cli_from_npm_package() {
-  install_mediaio_cli_from_release
+  if [[ "$MediaIoNodeReady" -ne 1 ]]; then
+    return 1
+  fi
+
+  if ! npm install -g "$MediaIoPackageName"; then
+    return 1
+  fi
+
+  MediaIoNpmBinDir="$(get_npm_global_bin_dir)/bin"
+  persist_npm_global_bin_dir_path "$MediaIoNpmBinDir"
+  if ! verify_mediaio_cli_available; then
+    add_warning "npm install succeeded, but mediaio is not yet on PATH. Persisting the npm global bin directory and continuing."
+    persist_npm_global_bin_dir_path "$MediaIoNpmBinDir"
+  fi
 }
 
 get_mediaio_plugin_source_candidates() {
@@ -280,9 +495,28 @@ get_local_mediaio_plugin_root() {
 }
 
 get_skill_target_bases() {
-  printf '%s\n' "$HOME/.codex/skills"
-  printf '%s\n' "$HOME/.claude/skills"
-  printf '%s\n' "$HOME/.agents/skills"
+  if [[ "$codex_available" -eq 1 ]]; then
+    printf '%s\n' "$HOME/.codex/skills"
+  fi
+  if [[ "$claude_available" -eq 1 ]]; then
+    printf '%s\n' "$HOME/.claude/skills"
+  fi
+}
+
+get_skill_target_agent_args() {
+  local agents=()
+  if [[ "$codex_available" -eq 1 ]]; then
+    agents+=("-a codex")
+  fi
+  if [[ "$claude_available" -eq 1 ]]; then
+    agents+=("-a claude-code")
+  fi
+
+  if [[ ${#agents[@]} -eq 0 ]]; then
+    return 1
+  fi
+
+  printf '%s\n' "${agents[*]}"
 }
 
 get_mediaio_skill_source_candidates() {
@@ -480,7 +714,9 @@ install_skill_files_from_local_source() {
 }
 
 install_skill_files_from_npx() {
-  npx --yes skills add media-io/plugin -g --skill '*' -y
+  local agent_args
+  agent_args="$(get_skill_target_agent_args)" || return 1
+  npx --yes skills add media-io/plugin -g $agent_args --skill '*' -y
 }
 
 install_skill_files() {
@@ -559,19 +795,27 @@ test_codex_plugin_cache_present() {
   return 1
 }
 
+verify_mediaio_cli_available() {
+  if command -v mediaio >/dev/null 2>&1; then
+    mediaio version >/dev/null 2>&1
+    return 0
+  fi
+
+  [[ -x "$MediaIoInstallDir/mediaio" ]]
+}
+
 printf '%s\n' "Media.io setup script"
-printf '%s\n' "This script installs the Media.io plugin, CLI, and skills. CLI and skills prefer direct package/local installers and fall back to npm/npx only when needed."
+printf '%s\n' "This script installs the Media.io plugin, CLI, and skills. The CLI prefers npm and falls back to a release archive; skills prefer direct package/local installers and fall back to npm/npx only when needed."
 
 check_optional_host "Preflight: locate claude" claude claude_available
 check_optional_host "Preflight: locate codex" codex codex_available
-run_checked_step "Preflight: ensure Node.js and npm" "ensure_node_and_npm" "" "Node.js, npm, and npx are available"
-run_checked_step "Install Media.io CLI" "install_mediaio_cli_from_npm_package" "mediaio version" "Media.io CLI is installed"
-run_checked_step "Run Media.io doctor" "mediaio doctor" "" "local Media.io checks passed"
+invoke_optional_fallback_step "Install Media.io CLI" "ensure_node_and_npm && install_mediaio_cli_from_npm_package" "install_mediaio_cli_from_release" "verify_mediaio_cli_available" "Media.io CLI is installed"
+invoke_checked_step "Run Media.io doctor" "mediaio doctor" "" "local Media.io checks passed"
 
 if [[ "$claude_available" -eq 1 ]]; then
-  run_checked_step "Add Media.io marketplace (Claude)" "claude plugin marketplace add media-io/plugin" "" "marketplace is registered"
-  run_checked_step "Refresh Media.io marketplace (Claude)" "claude plugin marketplace update media-io" "" "marketplace is refreshed"
-  run_checked_step "Verify Claude marketplace visibility" '
+  invoke_checked_step "Add Media.io marketplace (Claude)" "claude plugin marketplace add media-io/plugin" "" "marketplace is registered"
+  invoke_checked_step "Refresh Media.io marketplace (Claude)" "claude plugin marketplace update media-io" "" "marketplace is refreshed"
+  invoke_checked_step "Verify Claude marketplace visibility" '
     available_ids="$(get_claude_marketplace_ids)"
     if node -e '"'"'
       const ids = JSON.parse(process.argv[1]);
@@ -582,7 +826,7 @@ if [[ "$claude_available" -eq 1 ]]; then
       add_warning "Claude Code does not surface media-io from the configured marketplaces on this build."
     fi
   ' "" "Marketplace lookup finished"
-  run_checked_step "Install Claude Code plugin" '
+  invoke_checked_step "Install Claude Code plugin" '
     if ! claude plugin install media-io@media-io -s user -y; then
       return 1
     fi
@@ -591,7 +835,7 @@ if [[ "$claude_available" -eq 1 ]]; then
     fi
     claude_plugin_installed=1
   ' "" "Claude Code plugin install completed"
-  run_checked_step "Verify Claude Code plugin cache" '
+  invoke_checked_step "Verify Claude Code plugin cache" '
     cache_root="$(get_claude_plugin_cache_root)"
     [[ -d "$cache_root" ]]
     raw="$(claude plugin list --json 2>/dev/null || true)"
@@ -610,21 +854,33 @@ if [[ "$claude_available" -eq 1 ]]; then
 fi
 
 if [[ "$codex_available" -eq 1 ]]; then
-  run_checked_step "Add Media.io marketplace (Codex)" "codex plugin marketplace add media-io/plugin" "" "marketplace is registered"
-  run_checked_step "Refresh Media.io marketplace (Codex)" "codex plugin marketplace upgrade media-io" "" "marketplace is refreshed"
-  run_checked_step "Verify Codex marketplace visibility" '
-    available_ids="$(get_codex_available_plugin_ids)"
-    if node -e '"'"'
-      const ids = JSON.parse(process.argv[1]);
-      if (!ids.includes("media-io@media-io")) process.exit(1);
-    '"'"' "$available_ids"; then
-      printf '"'"'  OK: Codex can see media-io in the git marketplace snapshot\n'"'"'
-    else
+  if ! invoke_soft_step "Add Media.io marketplace (Codex)" "codex plugin marketplace add media-io/plugin" "Codex marketplace is registered"; then
+    use_personal_marketplace_fallback=1
+  fi
+
+  if [[ "$use_personal_marketplace_fallback" -eq 0 ]]; then
+    if ! invoke_soft_step "Refresh Media.io marketplace (Codex)" "codex plugin marketplace upgrade media-io" "Codex marketplace is refreshed"; then
       use_personal_marketplace_fallback=1
-      add_warning "Codex does not surface media-io from the git marketplace snapshot on this build. I will fall back to the personal marketplace."
     fi
-  ' "" "Marketplace lookup finished"
-  run_checked_step "Install Codex plugin" '
+  fi
+
+  if [[ "$use_personal_marketplace_fallback" -eq 0 ]]; then
+    if ! invoke_soft_step "Verify Codex marketplace visibility" '
+      available_ids="$(get_codex_available_plugin_ids)"
+      if node -e '"'"'
+        const ids = JSON.parse(process.argv[1]);
+        if (!ids.includes("media-io@media-io")) process.exit(1);
+      '"'"' "$available_ids"; then
+        printf '"'"'  OK: Codex can see media-io in the git marketplace snapshot\n'"'"'
+      else
+        add_warning "Codex does not surface media-io from the git marketplace snapshot on this build."
+        return 1
+      fi
+    ' "Codex marketplace lookup finished"; then
+      use_personal_marketplace_fallback=1
+    fi
+  fi
+  invoke_checked_step "Install Codex plugin" '
     installed_marketplace_name="media-io"
 
     if [[ "$use_personal_marketplace_fallback" -eq 0 ]]; then
@@ -651,7 +907,7 @@ if [[ "$codex_available" -eq 1 ]]; then
     fi
     codex_plugin_installed=1
   ' "" "Codex plugin install completed"
-  run_checked_step "Verify Codex plugin cache" '
+  invoke_checked_step "Verify Codex plugin cache" '
     [[ -n "$resolved_codex_marketplace_name" ]]
     cache_root="$(get_codex_plugin_cache_root "$resolved_codex_marketplace_name")"
     [[ -d "$cache_root" ]]
@@ -674,31 +930,22 @@ if [[ "$claude_plugin_installed" -eq 1 || "$codex_plugin_installed" -eq 1 ]]; th
   remove_direct_mediaio_skills_if_present
   printf '  OK: plugin-provided skills are installed; direct skills install is skipped to avoid duplicate entries\n'
 else
-  run_checked_step "Install Media.io skills" "install_skill_files" "" "skills are installed"
+  invoke_checked_step "Install Media.io skills" "install_skill_files" "" "skills are installed"
 fi
 
 write_step "Final verification"
-if mediaio version >/dev/null 2>&1; then
+if verify_mediaio_cli_available; then
   printf '  OK: mediaio version responded\n'
 else
   add_failure "Final verification - mediaio version failed"
 fi
 
-if [[ "$claude_plugin_installed" -eq 1 ]]; then
-  if ! test_claude_plugin_cache_present; then
+if [[ "$claude_plugin_installed" -eq 1 || "$codex_plugin_installed" -eq 1 ]]; then
+  if [[ "$claude_plugin_installed" -eq 1 ]] && ! test_claude_plugin_cache_present; then
     add_failure "Final verification - Claude Code plugin cache is still missing."
   fi
-fi
-
-if [[ "$codex_plugin_installed" -eq 1 ]]; then
-  if ! test_codex_plugin_cache_present; then
+  if [[ "$codex_plugin_installed" -eq 1 ]] && ! test_codex_plugin_cache_present; then
     add_failure "Final verification - Codex plugin cache is still missing."
-  fi
-fi
-
-if [[ "$claude_plugin_installed" -eq 1 || "$codex_plugin_installed" -eq 1 ]]; then
-  if ! test_skill_directories_absent; then
-    add_failure "Final verification - duplicate direct skill directories are still present."
   fi
 else
   if ! test_skill_directories_present; then
