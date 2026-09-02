@@ -7,8 +7,26 @@ $ErrorActionPreference = "Stop"
 $script:StepIndex = 0
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
-$script:UsePersonalMarketplaceFallback = $false
+$script:ResolvedClaudeMarketplaceName = $null
+$script:UseCodexPersonalMarketplaceFallback = $false
 $script:ResolvedCodexMarketplaceName = $null
+$script:ResolvedMediaIoSkillSource = $null
+$script:ClaudeAvailable = $false
+$script:CodexAvailable = $false
+
+$MediaIoPackageName = if ($env:MEDIAIO_NPM_PACKAGE) { $env:MEDIAIO_NPM_PACKAGE } else { "@mediaio/cli" }
+$MediaIoMarketplaceSource = if ($env:MEDIAIO_MARKETPLACE_SOURCE) { $env:MEDIAIO_MARKETPLACE_SOURCE } else { "media-io/plugin" }
+$MediaIoClaudePluginId = if ($env:MEDIAIO_CLAUDE_PLUGIN_ID) { $env:MEDIAIO_CLAUDE_PLUGIN_ID } else { "media-io@media-io" }
+$MediaIoCodexPluginName = if ($env:MEDIAIO_CODEX_PLUGIN_NAME) { $env:MEDIAIO_CODEX_PLUGIN_NAME } else { "media-io" }
+$MediaIoCodexMarketplaceName = if ($env:MEDIAIO_CODEX_MARKETPLACE_NAME) { $env:MEDIAIO_CODEX_MARKETPLACE_NAME } else { "media-io" }
+$MediaIoInstallDir = if ($env:MEDIAIO_INSTALL_DIR) { $env:MEDIAIO_INSTALL_DIR } else { Join-Path $HOME ".local\bin" }
+$MediaIoNpmRegistry = if ($env:MEDIAIO_NPM_REGISTRY) { $env:MEDIAIO_NPM_REGISTRY.TrimEnd('/') } else { "https://registry.npmjs.org" }
+$MediaIoReleaseRepo = if ($env:MEDIAIO_RELEASE_REPO) { $env:MEDIAIO_RELEASE_REPO } else { "media-io/cli" }
+$MediaIoReleaseBaseUrl = if ($env:MEDIAIO_RELEASE_BASE_URL) { $env:MEDIAIO_RELEASE_BASE_URL.TrimEnd('/') } else { "https://github.com/$MediaIoReleaseRepo/releases/download" }
+$MediaIoVersion = if ($env:MEDIAIO_VERSION) { $env:MEDIAIO_VERSION } else { "latest" }
+$MediaIoSkillRepo = if ($env:MEDIAIO_SKILL_REPO) { $env:MEDIAIO_SKILL_REPO } else { "media-io/plugin" }
+$MediaIoSkillSource = if ($env:MEDIAIO_SKILL_SOURCE) { $env:MEDIAIO_SKILL_SOURCE } else { "" }
+$MediaIoPluginArchiveUrl = if ($env:MEDIAIO_PLUGIN_ARCHIVE_URL) { $env:MEDIAIO_PLUGIN_ARCHIVE_URL } else { "https://github.com/media-io/plugin/archive/refs/heads/main.zip" }
 
 function Write-Step {
   param([Parameter(Mandatory = $true)][string]$Label)
@@ -36,33 +54,48 @@ function Test-CommandAvailable {
 
 function Add-DirectoryToPath {
   param([Parameter(Mandatory = $true)][string]$Directory)
-
-  if (-not (Test-Path $Directory)) {
-    return $false
-  }
+  if (-not (Test-Path $Directory)) { return $false }
 
   $segments = @($env:Path -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-  if ($segments -contains $Directory) {
-    return $false
-  }
+  if ($segments -contains $Directory) { return $false }
 
   $env:Path = "$Directory;$env:Path"
   return $true
 }
 
+function Add-DirectoryToUserPath {
+  param([Parameter(Mandatory = $true)][string]$Directory)
+  if (-not (Test-Path $Directory)) { return }
+
+  [void](Add-DirectoryToPath -Directory $Directory)
+  $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+  $segments = @($userPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  if ($segments -contains $Directory) { return }
+
+  if ([string]::IsNullOrWhiteSpace($userPath)) {
+    [Environment]::SetEnvironmentVariable("PATH", $Directory, "User")
+  } else {
+    [Environment]::SetEnvironmentVariable("PATH", "$Directory;$userPath", "User")
+  }
+}
+
 function Repair-NodePathFromCommonLocations {
-  $nodeDirs = @(
-    (Join-Path $env:ProgramFiles "nodejs"),
-    (Join-Path [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86) "nodejs"),
-    (Join-Path $env:LocalAppData "Programs\nodejs")
-  ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+  $nodeDirs = New-Object System.Collections.Generic.List[string]
+  if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+    $nodeDirs.Add((Join-Path -Path $env:ProgramFiles -ChildPath "nodejs"))
+  }
+  $programFilesX86 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+  if (-not [string]::IsNullOrWhiteSpace($programFilesX86)) {
+    $nodeDirs.Add((Join-Path -Path $programFilesX86 -ChildPath "nodejs"))
+  }
+  if (-not [string]::IsNullOrWhiteSpace($env:LocalAppData)) {
+    $nodeDirs.Add((Join-Path -Path $env:LocalAppData -ChildPath "Programs\nodejs"))
+  }
 
   $changed = $false
   foreach ($dir in $nodeDirs) {
     if (Test-Path (Join-Path $dir "npm.cmd")) {
-      if (Add-DirectoryToPath $dir) {
-        $changed = $true
-      }
+      if (Add-DirectoryToPath -Directory $dir) { $changed = $true }
     }
   }
 
@@ -95,9 +128,7 @@ function Install-NodeLts {
     throw "No supported package manager was found. Install Node.js LTS manually so npm becomes available."
   }
 
-  if (-not $installed) {
-    throw "Node.js LTS installation did not complete successfully."
-  }
+  if (-not $installed) { throw "Node.js LTS installation did not complete successfully." }
 
   Start-Sleep -Seconds 2
   [void](Repair-NodePathFromCommonLocations)
@@ -125,19 +156,11 @@ function Ensure-NodeAndNpm {
   }
 
   & cmd /c "node -v"
-  if ($LASTEXITCODE -ne 0) {
-    throw "node -v failed."
-  }
-
+  if ($LASTEXITCODE -ne 0) { throw "node -v failed." }
   & cmd /c "npm -v"
-  if ($LASTEXITCODE -ne 0) {
-    throw "npm -v failed."
-  }
-
+  if ($LASTEXITCODE -ne 0) { throw "npm -v failed." }
   & cmd /c "npx --version"
-  if ($LASTEXITCODE -ne 0) {
-    throw "npx --version failed."
-  }
+  if ($LASTEXITCODE -ne 0) { throw "npx --version failed." }
 }
 
 function Invoke-CheckedStep {
@@ -154,10 +177,7 @@ function Invoke-CheckedStep {
     $global:LASTEXITCODE = 0
     & $Action
     $exitCode = $LASTEXITCODE
-
-    if ($null -ne $exitCode -and $exitCode -ne 0) {
-      throw "Command exited with code $exitCode."
-    }
+    if ($null -ne $exitCode -and $exitCode -ne 0) { throw "Command exited with code $exitCode." }
 
     if ($Verify) {
       & $Verify
@@ -172,8 +192,7 @@ function Invoke-CheckedStep {
     } else {
       Write-Host "  OK" -ForegroundColor Green
     }
-
-    return $true
+    return
   } catch {
     Add-Failure "$Label - $($_.Exception.Message)"
     if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) {
@@ -182,58 +201,664 @@ function Invoke-CheckedStep {
     if ($_.ScriptStackTrace) {
       Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
     }
+    return
+  }
+}
+
+function Invoke-OptionalFallbackStep {
+  param(
+    [Parameter(Mandatory = $true)][string]$Label,
+    [Parameter(Mandatory = $true)][scriptblock]$Primary,
+    [Parameter(Mandatory = $true)][scriptblock]$Fallback,
+    [scriptblock]$Verify = $null,
+    [string]$SuccessMessage = ""
+  )
+
+  Write-Step $Label
+
+  try {
+    $global:LASTEXITCODE = 0
+    & $Primary
+    $exitCode = $LASTEXITCODE
+    if ($null -ne $exitCode -and $exitCode -ne 0) {
+      throw "Primary command exited with code $exitCode."
+    }
+  } catch {
+    Add-Warning "$Label primary path failed: $($_.Exception.Message)"
+    Write-Host "  Trying fallback path..." -ForegroundColor DarkGray
+    try {
+      $global:LASTEXITCODE = 0
+      & $Fallback
+      $fallbackExitCode = $LASTEXITCODE
+      if ($null -ne $fallbackExitCode -and $fallbackExitCode -ne 0) {
+        throw "Fallback command exited with code $fallbackExitCode."
+      }
+    } catch {
+      Add-Failure "$Label fallback failed: $($_.Exception.Message)"
+      return
+    }
+  }
+
+  try {
+    if ($Verify) {
+      & $Verify
+      $verifyExitCode = $LASTEXITCODE
+      if ($null -ne $verifyExitCode -and $verifyExitCode -ne 0) {
+        throw "Verification command exited with code $verifyExitCode."
+      }
+    }
+  } catch {
+    Add-Failure "$Label verification failed: $($_.Exception.Message)"
+    return
+  }
+
+  if ($SuccessMessage) {
+    Write-Host "  OK: $SuccessMessage" -ForegroundColor Green
+  } else {
+    Write-Host "  OK" -ForegroundColor Green
+  }
+  return
+}
+
+function Invoke-SoftStep {
+  param(
+    [Parameter(Mandatory = $true)][string]$Label,
+    [Parameter(Mandatory = $true)][scriptblock]$Action,
+    [string]$SuccessMessage = ""
+  )
+
+  Write-Step $Label
+
+  try {
+    $global:LASTEXITCODE = 0
+    & $Action
+    $exitCode = $LASTEXITCODE
+    if ($null -ne $exitCode -and $exitCode -ne 0) {
+      throw "Command exited with code $exitCode."
+    }
+
+    if ($SuccessMessage) {
+      Write-Host "  OK: $SuccessMessage" -ForegroundColor Green
+    } else {
+      Write-Host "  OK" -ForegroundColor Green
+    }
+    return $true
+  } catch {
+    Add-Warning "$Label failed: $($_.Exception.Message)"
     return $false
   }
 }
 
-function Invoke-SkillInstall {
-  Write-Step "Install Media.io skills"
+function Invoke-OptionalHostDetection {
+  param(
+    [Parameter(Mandatory = $true)][string]$Label,
+    [Parameter(Mandatory = $true)][string]$CommandName,
+    [Parameter(Mandatory = $true)][scriptblock]$Setter
+  )
 
-  $commandFailed = $false
-  try {
-    $global:LASTEXITCODE = 0
-    & cmd /c "npx --yes skills add media-io/plugin -g --skill * -y"
-    $exitCode = $LASTEXITCODE
-    if ($null -ne $exitCode -and $exitCode -ne 0) {
-      $commandFailed = $true
-      Add-Warning "Installer returned exit code $exitCode. Checking whether the skill files still landed."
-    }
-  } catch {
-    Add-Failure "Install Media.io skills - $($_.Exception.Message)"
-    return $false
+  Write-Step $Label
+  if (Test-CommandAvailable $CommandName) {
+    & $Setter $true
+    Write-Host "  OK: $CommandName is available" -ForegroundColor Green
+  } else {
+    & $Setter $false
+    Add-Warning "$CommandName is not available; skipping $Label dependent steps."
+  }
+}
+
+function Get-MediaIoArch {
+  if ($env:MEDIAIO_ARCH) {
+    $override = $env:MEDIAIO_ARCH.ToLower()
+    if ($override -eq "amd64" -or $override -eq "arm64") { return $override }
+    throw "Invalid MEDIAIO_ARCH value '$env:MEDIAIO_ARCH'. Must be 'amd64' or 'arm64'."
   }
 
-  $requiredPaths = @(
-    Join-Path $env:USERPROFILE ".agents\skills\mediaio-generate\SKILL.md"
-    Join-Path $env:USERPROFILE ".agents\skills\mediaio-install\SKILL.md"
+  try {
+    $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+    if ($arch) {
+      switch ($arch.ToString()) {
+        "X64" { return "amd64" }
+        "Arm64" { return "arm64" }
+      }
+    }
+  } catch {}
+
+  $envArch = $env:PROCESSOR_ARCHITECTURE
+  if ($envArch) {
+    switch ($envArch.ToUpper()) {
+      "AMD64" { return "amd64" }
+      "ARM64" { return "arm64" }
+      "X86" {
+        $realArch = $env:PROCESSOR_ARCHITEW6432
+        if ($realArch) {
+          switch ($realArch.ToUpper()) {
+            "AMD64" { return "amd64" }
+            "ARM64" { return "arm64" }
+          }
+        }
+        throw "32-bit Windows is not supported."
+      }
+    }
+  }
+
+  throw "Unsupported architecture. Set MEDIAIO_ARCH to 'amd64' or 'arm64'."
+}
+
+function Get-NpmPackageMetadataUrl {
+  $escapedPackageName = [System.Uri]::EscapeDataString($MediaIoPackageName)
+  return "$MediaIoNpmRegistry/$escapedPackageName"
+}
+
+function Resolve-MediaIoNpmPackageInfo {
+  $metadataUrl = Get-NpmPackageMetadataUrl
+  Write-Host "  Resolving $MediaIoPackageName from $metadataUrl" -ForegroundColor DarkGray
+  $metadata = Invoke-RestMethod -Uri $metadataUrl -UseBasicParsing -ErrorAction Stop
+
+  $npmVersion = $script:MediaIoVersion
+  if ($npmVersion -eq "latest") {
+    $latestTag = $metadata.'dist-tags'.latest
+    if ([string]::IsNullOrWhiteSpace([string]$latestTag)) {
+      throw "npm metadata for $MediaIoPackageName does not declare dist-tags.latest."
+    }
+    $npmVersion = [string]$latestTag
+  } elseif ($npmVersion.StartsWith("v")) {
+    $npmVersion = $npmVersion.Substring(1)
+  }
+
+  $versionProperty = $metadata.versions.PSObject.Properties[$npmVersion]
+  if ($null -eq $versionProperty) {
+    throw "npm metadata for $MediaIoPackageName does not contain version $npmVersion."
+  }
+
+  $versionInfo = $versionProperty.Value
+  if ($null -eq $versionInfo.dist -or [string]::IsNullOrWhiteSpace([string]$versionInfo.dist.tarball)) {
+    throw "npm metadata for $MediaIoPackageName@$npmVersion does not declare dist.tarball."
+  }
+
+  $script:MediaIoVersion = $npmVersion
+  return [pscustomobject]@{
+    Version = $npmVersion
+    Tarball = [string]$versionInfo.dist.tarball
+    Integrity = [string]$versionInfo.dist.integrity
+    Shasum = [string]$versionInfo.dist.shasum
+  }
+}
+
+function Resolve-MediaIoVersionFromNpm {
+  $packageInfo = Resolve-MediaIoNpmPackageInfo
+  Write-Host "  Resolved Media.io CLI npm release to $($packageInfo.Version)" -ForegroundColor DarkGray
+}
+
+function Get-MediaIoReleaseTag {
+  if ($script:MediaIoVersion.StartsWith("v")) { return $script:MediaIoVersion }
+  return "v$script:MediaIoVersion"
+}
+
+function Assert-NpmPackageIntegrityIfAvailable {
+  param(
+    [Parameter(Mandatory = $true)][string]$AssetPath,
+    [string]$Integrity = "",
+    [string]$Shasum = ""
   )
+
+  if (-not [string]::IsNullOrWhiteSpace($Integrity)) {
+    $integrityItems = @($Integrity -split '\s+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    foreach ($item in $integrityItems) {
+      if ($item -notmatch '^sha512-(.+)$') { continue }
+      $expectedBytes = [Convert]::FromBase64String($Matches[1])
+      $actualBytes = [System.Security.Cryptography.SHA512]::Create().ComputeHash([System.IO.File]::ReadAllBytes($AssetPath))
+      $expected = [Convert]::ToBase64String($expectedBytes)
+      $actual = [Convert]::ToBase64String($actualBytes)
+      if ($actual -ne $expected) {
+        throw "npm package integrity mismatch. Expected sha512-$expected, got sha512-$actual."
+      }
+      Write-Host "  OK: npm package integrity verified with sha512" -ForegroundColor Green
+      return
+    }
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($Shasum)) {
+    $actualSha1 = (Get-FileHash -LiteralPath $AssetPath -Algorithm SHA1 -ErrorAction Stop).Hash.ToLowerInvariant()
+    if ($actualSha1 -ne $Shasum.ToLowerInvariant()) {
+      throw "npm package shasum mismatch. Expected $Shasum, got $actualSha1."
+    }
+    Write-Host "  OK: npm package shasum verified with sha1" -ForegroundColor Green
+    return
+  }
+
+  Add-Warning "npm metadata did not include dist.integrity or dist.shasum, so package verification is skipped."
+}
+
+function Install-MediaIoExeFromArchive {
+  param(
+    [Parameter(Mandatory = $true)][string]$AssetPath,
+    [Parameter(Mandatory = $true)][string]$AssetName,
+    [Parameter(Mandatory = $true)][string]$TempDir
+  )
+
+  $sourceExe = $AssetPath
+  $extractRoot = Join-Path $TempDir "extract"
+  $assetNameLower = $AssetName.ToLower()
+
+  if ($assetNameLower.EndsWith(".zip")) {
+    Expand-Archive -Path $AssetPath -DestinationPath $extractRoot -Force
+    $binFile = Get-ChildItem -Path $extractRoot -Recurse -Filter "mediaio.exe" | Select-Object -First 1
+    if ($null -eq $binFile) { throw "Could not find mediaio.exe in $AssetName." }
+    $sourceExe = $binFile.FullName
+  } elseif ($assetNameLower.EndsWith(".tar.gz") -or $assetNameLower.EndsWith(".tgz")) {
+    New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+    & tar -xzf $AssetPath -C $extractRoot
+    if ($LASTEXITCODE -ne 0) {
+      throw "tar failed to extract $AssetName."
+    }
+    $binFile = Get-ChildItem -Path $extractRoot -Recurse -Filter "mediaio.exe" | Select-Object -First 1
+    if ($null -eq $binFile) { throw "Could not find mediaio.exe in $AssetName." }
+    $sourceExe = $binFile.FullName
+  }
+
+  if (!(Test-Path $MediaIoInstallDir)) {
+    New-Item -ItemType Directory -Path $MediaIoInstallDir -Force | Out-Null
+  }
+
+  $destBin = Join-Path $MediaIoInstallDir "mediaio.exe"
+  $stagedBin = Join-Path $MediaIoInstallDir ".mediaio.tmp-$PID.exe"
+  Copy-Item -LiteralPath $sourceExe -Destination $stagedBin -Force
+  Move-Item -LiteralPath $stagedBin -Destination $destBin -Force
+  Add-DirectoryToUserPath -Directory $MediaIoInstallDir
+}
+
+function Install-MediaIoCliFromNpmPackage {
+  if ($env:MEDIAIO_BINARY_URL) {
+    Install-MediaIoCliFromRelease
+    return
+  }
+
+  Resolve-MediaIoVersionFromNpm
+  Install-MediaIoCliFromRelease
+}
+
+function Resolve-MediaIoLatestVersion {
+  if ($script:MediaIoVersion -ne "latest") { return }
+
+  $releasesApiUrl = "https://api.github.com/repos/$MediaIoReleaseRepo/releases"
+  try {
+    $releases = Invoke-RestMethod -Uri $releasesApiUrl -UseBasicParsing -ErrorAction Stop
+    $candidates = @()
+    foreach ($release in @($releases)) {
+      if ($release.draft -or $release.prerelease) { continue }
+      $tag = [string]$release.tag_name
+      if ($tag -notmatch '^v?(\d+\.\d+\.\d+)$') { continue }
+      $candidates += [pscustomobject]@{
+        Tag = $tag
+        Version = [version]$Matches[1]
+      }
+    }
+
+    if ($candidates.Count -gt 0) {
+      $selected = $candidates | Sort-Object -Property Version -Descending | Select-Object -First 1
+      $script:MediaIoVersion = $selected.Tag
+      Write-Host "  Resolved latest Media.io CLI release to $script:MediaIoVersion" -ForegroundColor DarkGray
+      return
+    }
+  } catch {
+    Add-Warning "Could not resolve latest Media.io CLI version from GitHub releases API: $($_.Exception.Message)"
+  }
+
+  $latestUrl = "https://github.com/$MediaIoReleaseRepo/releases/latest"
+  try {
+    Invoke-WebRequest -Uri $latestUrl -MaximumRedirection 0 -ErrorAction SilentlyContinue -UseBasicParsing 2>$null | Out-Null
+  } catch {
+    if ($_.Exception.Response.Headers.Location) {
+      $location = $_.Exception.Response.Headers.Location.ToString()
+      $script:MediaIoVersion = ($location -split "/tag/")[-1].Trim()
+      return
+    }
+  }
+
+  try {
+    $response = Invoke-WebRequest -Uri $latestUrl -UseBasicParsing -ErrorAction Stop
+    if ($response.BaseResponse.ResponseUri) {
+      $script:MediaIoVersion = ($response.BaseResponse.ResponseUri.ToString() -split "/tag/")[-1].Trim()
+      return
+    }
+    if ($response.BaseResponse.RequestMessage.RequestUri) {
+      $script:MediaIoVersion = ($response.BaseResponse.RequestMessage.RequestUri.ToString() -split "/tag/")[-1].Trim()
+      return
+    }
+  } catch {}
+
+  throw "Could not determine the latest Media.io CLI release version. Set MEDIAIO_VERSION explicitly."
+}
+
+function Get-MediaIoArchiveName {
+  if ($env:MEDIAIO_ARCHIVE_NAME) { return $env:MEDIAIO_ARCHIVE_NAME }
+  $arch = Get-MediaIoArch
+  $releaseVersion = $script:MediaIoVersion
+  if ($releaseVersion.StartsWith("v")) {
+    $releaseVersion = $releaseVersion.Substring(1)
+  }
+  return "mediaio_${releaseVersion}_windows_${arch}.tar.gz"
+}
+
+function Assert-MediaIoChecksumIfAvailable {
+  param(
+    [Parameter(Mandatory = $true)][string]$AssetPath,
+    [Parameter(Mandatory = $true)][string]$AssetName,
+    [Parameter(Mandatory = $true)][string]$TempDir
+  )
+
+  $checksumUrl = $env:MEDIAIO_CHECKSUM_URL
+  if ([string]::IsNullOrWhiteSpace($checksumUrl)) {
+    if ([string]::IsNullOrWhiteSpace($env:MEDIAIO_BINARY_URL)) {
+      $checksumUrl = "$MediaIoReleaseBaseUrl/$(Get-MediaIoReleaseTag)/checksums.txt"
+    } else {
+      Add-Warning "MEDIAIO_BINARY_URL is set without MEDIAIO_CHECKSUM_URL, so checksum verification is skipped."
+      return
+    }
+  }
+
+  $checksumPath = Join-Path $TempDir "checksums.txt"
+  try {
+    Invoke-WebRequest -Uri $checksumUrl -OutFile $checksumPath -UseBasicParsing -ErrorAction Stop
+  } catch {
+    Add-Warning "Could not download checksums.txt from $checksumUrl, so fallback binary checksum verification is skipped."
+    return
+  }
+
+  $expectedLine = Get-Content -LiteralPath $checksumPath | Where-Object {
+    $_ -match "^[0-9A-Fa-f]{64}[ ]+[*]?$([regex]::Escape($AssetName))$"
+  } | Select-Object -First 1
+
+  if (-not $expectedLine) {
+    Add-Warning "$AssetName is missing from checksums.txt, so fallback binary checksum verification is skipped."
+    return
+  }
+
+  $expected = ($expectedLine -split '\s+')[0].ToLowerInvariant()
+  $actual = (Get-FileHash -LiteralPath $AssetPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+  if ($actual -ne $expected) {
+    throw "SHA256 checksum mismatch for $AssetName. Expected $expected, got $actual."
+  }
+  Write-Host "  OK: SHA256 checksum verified for $AssetName" -ForegroundColor Green
+}
+
+function Install-MediaIoCliFromRelease {
+  Resolve-MediaIoLatestVersion
+
+  $archiveName = Get-MediaIoArchiveName
+  $downloadUrl = $env:MEDIAIO_BINARY_URL
+  if ([string]::IsNullOrWhiteSpace($downloadUrl)) {
+    $downloadUrl = "$MediaIoReleaseBaseUrl/$(Get-MediaIoReleaseTag)/$archiveName"
+  }
+
+  if (!(Test-Path $MediaIoInstallDir)) {
+    New-Item -ItemType Directory -Path $MediaIoInstallDir -Force | Out-Null
+  }
+
+  $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) "mediaio-install-$PID"
+  New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+
+  try {
+    $assetName = Split-Path ([System.Uri]$downloadUrl).AbsolutePath -Leaf
+    if ([string]::IsNullOrWhiteSpace($assetName)) { $assetName = $archiveName }
+    $assetPath = Join-Path $tmpDir $assetName
+
+    Write-Host "  Downloading Media.io CLI from $downloadUrl" -ForegroundColor DarkGray
+    Invoke-WebRequest -Uri $downloadUrl -OutFile $assetPath -UseBasicParsing
+    Assert-MediaIoChecksumIfAvailable -AssetPath $assetPath -AssetName $assetName -TempDir $tmpDir
+
+    $sourceExe = $assetPath
+    $extractRoot = Join-Path $tmpDir "extract"
+    if ($assetName.ToLower().EndsWith(".zip")) {
+      Expand-Archive -Path $assetPath -DestinationPath $extractRoot -Force
+      $binFile = Get-ChildItem -Path $extractRoot -Recurse -Filter "mediaio.exe" | Select-Object -First 1
+      if ($null -eq $binFile) { throw "Could not find mediaio.exe in $assetName." }
+      $sourceExe = $binFile.FullName
+    } elseif ($assetName.ToLower().EndsWith(".tar.gz") -or $assetName.ToLower().EndsWith(".tgz")) {
+      New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+      & tar -xzf $assetPath -C $extractRoot
+      if ($LASTEXITCODE -ne 0) {
+        throw "tar failed to extract $assetName."
+      }
+      $binFile = Get-ChildItem -Path $extractRoot -Recurse -Filter "mediaio.exe" | Select-Object -First 1
+      if ($null -eq $binFile) { throw "Could not find mediaio.exe in $assetName." }
+      $sourceExe = $binFile.FullName
+    }
+
+    $destBin = Join-Path $MediaIoInstallDir "mediaio.exe"
+    $stagedBin = Join-Path $MediaIoInstallDir ".mediaio.tmp-$PID.exe"
+    Copy-Item -LiteralPath $sourceExe -Destination $stagedBin -Force
+    Move-Item -LiteralPath $stagedBin -Destination $destBin -Force
+    Add-DirectoryToUserPath -Directory $MediaIoInstallDir
+  } finally {
+    Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Copy-DirRecursive {
+  param(
+    [Parameter(Mandatory = $true)][string]$Source,
+    [Parameter(Mandatory = $true)][string]$Destination
+  )
+
+  if (!(Test-Path $Destination)) {
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+  }
+
+  $count = 0
+  Get-ChildItem -Path $Source -Force | ForEach-Object {
+    $destPath = Join-Path $Destination $_.Name
+    if ($_.PSIsContainer) {
+      $count += Copy-DirRecursive -Source $_.FullName -Destination $destPath
+    } else {
+      Copy-Item -Path $_.FullName -Destination $destPath -Force
+      $count++
+    }
+  }
+  return $count
+}
+
+function Backup-DirectoryIfPresent {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  if (!(Test-Path $Path)) { return $null }
+
+  $backupRoot = Join-Path $HOME ".mediaio\skill-backups"
+  $stamp = [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss")
+  $targetRoot = Join-Path $backupRoot $stamp
+  $target = Join-Path $targetRoot (Split-Path $Path -Leaf)
+  $i = 1
+
+  while (Test-Path $target) {
+    $targetRoot = Join-Path $backupRoot "$stamp-$i"
+    $target = Join-Path $targetRoot (Split-Path $Path -Leaf)
+    $i++
+  }
+
+  New-Item -ItemType Directory -Path $targetRoot -Force | Out-Null
+  Move-Item -LiteralPath $Path -Destination $target -ErrorAction Stop
+  Write-Host "  Backed up existing skill: $Path -> $target" -ForegroundColor DarkGray
+  return [pscustomobject]@{ Original = $Path; Backup = $target }
+}
+
+function Restore-BackedUpDirectories {
+  param([array]$Backups)
+
+  $ok = $true
+  for ($i = $Backups.Count - 1; $i -ge 0; $i--) {
+    $item = $Backups[$i]
+    try {
+      if (Test-Path $item.Original) {
+        Remove-Item -LiteralPath $item.Original -Recurse -Force -ErrorAction Stop
+      }
+      Move-Item -LiteralPath $item.Backup -Destination $item.Original -ErrorAction Stop
+    } catch {
+      Add-Warning "Could not restore backed up skill $($item.Original); backup remains at $($item.Backup): $($_.Exception.Message)"
+      $ok = $false
+    }
+  }
+
+  return $ok
+}
+
+function Get-MediaIoSkillSourceCandidates {
+  $candidates = New-Object System.Collections.Generic.List[string]
+  if (-not [string]::IsNullOrWhiteSpace($MediaIoSkillSource)) {
+    $candidates.Add($MediaIoSkillSource)
+  }
+  if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+    $candidates.Add((Join-Path $PSScriptRoot "skills"))
+  }
+  $localPluginSkills = Join-Path (Get-LocalMediaIoPluginRoot) "skills"
+  $candidates.Add($localPluginSkills)
+  try {
+    $cacheSkills = Join-Path (Get-ClaudePluginCacheRoot) "skills"
+    $candidates.Add($cacheSkills)
+  } catch {}
+  try {
+    if (-not [string]::IsNullOrWhiteSpace([string]$script:ResolvedCodexMarketplaceName)) {
+      $cacheSkills = Join-Path (Get-CodexPluginCacheRoot -MarketplaceName $script:ResolvedCodexMarketplaceName) "skills"
+      $candidates.Add($cacheSkills)
+    }
+  } catch {}
+
+  $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  return @($candidates | Where-Object {
+    -not [string]::IsNullOrWhiteSpace($_) -and $seen.Add([System.IO.Path]::GetFullPath($_))
+  })
+}
+
+function Get-LocalMediaIoSkillDirs {
+  foreach ($source in Get-MediaIoSkillSourceCandidates) {
+    if (!(Test-Path $source)) { continue }
+    $dirs = @(Get-ChildItem -Path $source -Directory -ErrorAction SilentlyContinue | Where-Object {
+      Test-Path (Join-Path $_.FullName "SKILL.md")
+    })
+    if ($dirs.Count -gt 0) {
+      $script:ResolvedMediaIoSkillSource = $source
+      return $dirs
+    }
+  }
+
+  return @()
+}
+
+function Get-MediaIoSkillTargetBases {
+  $targets = @()
+  if ($script:CodexAvailable) {
+    $targets += [pscustomobject]@{ Agent = "codex"; BaseDir = (Join-Path $HOME ".codex\skills") }
+  }
+  if ($script:ClaudeAvailable) {
+    $targets += [pscustomobject]@{ Agent = "claude-code"; BaseDir = (Join-Path $HOME ".claude\skills") }
+  }
+  return @($targets)
+}
+
+function Install-MediaIoSkillsToBase {
+  param(
+    [Parameter(Mandatory = $true)][array]$SkillDirs,
+    [Parameter(Mandatory = $true)][string]$BaseDir,
+    [Parameter(Mandatory = $true)][string]$Agent
+  )
+
+  if (!(Test-Path $baseDir)) {
+    New-Item -ItemType Directory -Path $baseDir -Force | Out-Null
+  }
+
+  $stageRoot = Join-Path $baseDir (".mediaio-skills-set-" + [guid]::NewGuid().ToString("N"))
+  $backups = @()
+  $published = @()
+  try {
+    New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
+    foreach ($skillDir in $skillDirs) {
+      Copy-DirRecursive -Source $skillDir.FullName -Destination (Join-Path $stageRoot $skillDir.Name) | Out-Null
+    }
+
+    foreach ($skillDir in $skillDirs) {
+      $dest = Join-Path $baseDir $skillDir.Name
+      $backup = Backup-DirectoryIfPresent -Path $dest
+      if ($null -ne $backup) { $backups += $backup }
+      Move-Item -LiteralPath (Join-Path $stageRoot $skillDir.Name) -Destination $dest -ErrorAction Stop
+      $published += $dest
+      Write-Host "  Skills -> $dest ($Agent)" -ForegroundColor DarkGray
+    }
+  } catch {
+    foreach ($path in $published) {
+      Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    [void](Restore-BackedUpDirectories -Backups $backups)
+    throw
+  } finally {
+    Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Install-MediaIoSkillsFromLocalSource {
+  $skillDirs = @(Get-LocalMediaIoSkillDirs)
+  if ($skillDirs.Count -eq 0) {
+    throw "No local Media.io skill directories found in: $((Get-MediaIoSkillSourceCandidates) -join ', ')."
+  }
+  $targets = @(Get-MediaIoSkillTargetBases)
+  if ($targets.Count -eq 0) {
+    Add-Warning "Neither Codex nor Claude Code is available; skipping Media.io skills installation."
+    return
+  }
+  Write-Host "  Installing skills from $script:ResolvedMediaIoSkillSource" -ForegroundColor DarkGray
+
+  foreach ($target in $targets) {
+    Install-MediaIoSkillsToBase -SkillDirs $skillDirs -BaseDir $target.BaseDir -Agent $target.Agent
+  }
+}
+
+function Test-MediaIoSkillsInstalled {
+  $requiredPaths = @()
+  $targets = @(Get-MediaIoSkillTargetBases)
+  if ($targets.Count -eq 0) {
+    Add-Warning "Neither Codex nor Claude Code is available; no Media.io skills target was verified."
+    return
+  }
+
+  foreach ($target in $targets) {
+    $requiredPaths += Join-Path $target.BaseDir "mediaio-generate\SKILL.md"
+    $requiredPaths += Join-Path $target.BaseDir "mediaio-install\SKILL.md"
+  }
+
   $missing = @()
   foreach ($path in $requiredPaths) {
-    if (-not (Test-Path $path)) {
-      $missing += $path
-    }
+    if (-not (Test-Path $path)) { $missing += $path }
   }
 
   if ($missing.Count -gt 0) {
-    Add-Failure ("Missing skill file(s): " + ($missing -join ", "))
-    return $false
+    throw "Missing skill file(s): $($missing -join ', ')"
   }
-
-  if ($commandFailed) {
-    Add-Warning "Skill files are present even though the installer warned. That is usually enough for Codex to load the skills."
-  } else {
-    Write-Host "  OK: skills are installed" -ForegroundColor Green
-  }
-
-  return $true
 }
 
-function Get-MediaIoSourceRoot {
-  return Join-Path $env:USERPROFILE ".codex\.tmp\marketplaces\media-io"
+function Get-MediaIoSkillAgentArgs {
+  $agents = @()
+  foreach ($target in @(Get-MediaIoSkillTargetBases)) {
+    $agents += "-a $($target.Agent)"
+  }
+
+  if ($agents.Count -eq 0) {
+    throw "Neither Codex nor Claude Code is available; cannot run targeted npx skills fallback."
+  }
+
+  return ($agents -join " ")
+}
+
+function Invoke-MediaIoSkillInstall {
+  Invoke-OptionalFallbackStep "Install Media.io skills" {
+    Install-MediaIoSkillsFromLocalSource
+  } {
+    Ensure-NodeAndNpm
+    $agentArgs = Get-MediaIoSkillAgentArgs
+    & cmd /c "npx --yes skills add $MediaIoSkillRepo -g $agentArgs --skill * -y"
+  } {
+    Test-MediaIoSkillsInstalled
+  } -SuccessMessage "Media.io skills are installed"
 }
 
 function Get-MediaIoPluginVersion {
-  $manifestPath = Join-Path (Get-MediaIoSourceRoot) ".codex-plugin\plugin.json"
+  $manifestPath = Join-Path $PSScriptRoot ".claude-plugin\plugin.json"
   if (-not (Test-Path $manifestPath)) {
     throw "Media.io plugin manifest not found at $manifestPath."
   }
@@ -246,12 +871,53 @@ function Get-MediaIoPluginVersion {
   return [string]$manifest.version
 }
 
+function Get-CodexMarketplaceCheckoutRoot {
+  return Join-Path $env:USERPROFILE ".codex\.tmp\marketplaces\$MediaIoCodexMarketplaceName"
+}
+
+function Get-CodexMediaIoPluginVersion {
+  $candidateManifests = @(
+    (Join-Path (Get-CodexMarketplaceCheckoutRoot) ".codex-plugin\plugin.json"),
+    (Join-Path $PSScriptRoot ".codex-plugin\plugin.json"),
+    (Join-Path $PSScriptRoot ".claude-plugin\plugin.json"),
+    (Join-Path (Get-LocalMediaIoPluginRoot) ".codex-plugin\plugin.json"),
+    (Join-Path (Get-LocalMediaIoPluginRoot) "plugin.json")
+  )
+
+  foreach ($manifestPath in $candidateManifests) {
+    if (-not (Test-Path $manifestPath)) { continue }
+    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+    if (-not [string]::IsNullOrWhiteSpace([string]$manifest.version)) {
+      return [string]$manifest.version
+    }
+  }
+
+  throw "Media.io Codex plugin manifest does not declare a version."
+}
+
 function Get-PersonalMarketplacePath {
   return Join-Path $env:USERPROFILE ".agents\plugins\marketplace.json"
 }
 
 function Get-LocalMediaIoPluginRoot {
   return Join-Path $env:USERPROFILE "plugins\media-io"
+}
+
+function Get-MediaIoPluginSourceCandidates {
+  $candidates = New-Object System.Collections.Generic.List[string]
+  if ($env:MEDIAIO_PLUGIN_SOURCE) {
+    $candidates.Add($env:MEDIAIO_PLUGIN_SOURCE)
+  }
+  if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+    $candidates.Add($PSScriptRoot)
+  }
+  $candidates.Add((Get-CodexMarketplaceCheckoutRoot))
+  $candidates.Add((Get-LocalMediaIoPluginRoot))
+
+  $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  return @($candidates | Where-Object {
+    -not [string]::IsNullOrWhiteSpace($_) -and $seen.Add([System.IO.Path]::GetFullPath($_))
+  })
 }
 
 function Get-PersonalMarketplaceName {
@@ -274,9 +940,7 @@ function Format-DisplayNameFromName {
   param([Parameter(Mandatory = $true)][string]$Name)
 
   $parts = @($Name -split "[-_]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-  if ($parts.Count -eq 0) {
-    return "Personal"
-  }
+  if ($parts.Count -eq 0) { return "Personal" }
 
   return (($parts | ForEach-Object {
     if ($_.Length -le 1) {
@@ -303,34 +967,97 @@ function Write-JsonNoBom {
   [System.IO.File]::WriteAllText($Path, $json, $utf8NoBom)
 }
 
-function Initialize-LocalMediaIoPluginRoot {
-  $sourceRoot = Get-MediaIoSourceRoot
-  $pluginRoot = Get-LocalMediaIoPluginRoot
+function Test-ObjectProperty {
+  param(
+    [Parameter(Mandatory = $true)][object]$InputObject,
+    [Parameter(Mandatory = $true)][string]$Name
+  )
 
-  if (-not (Test-Path $sourceRoot)) {
-    throw "Media.io marketplace checkout not found at $sourceRoot."
+  return $null -ne $InputObject.PSObject.Properties[$Name]
+}
+
+function Set-ObjectProperty {
+  param(
+    [Parameter(Mandatory = $true)][object]$InputObject,
+    [Parameter(Mandatory = $true)][string]$Name,
+    [AllowNull()][object]$Value
+  )
+
+  if (Test-ObjectProperty -InputObject $InputObject -Name $Name) {
+    $InputObject.$Name = $Value
+  } else {
+    $InputObject | Add-Member -NotePropertyName $Name -NotePropertyValue $Value
+  }
+}
+
+function Initialize-LocalMediaIoPluginRoot {
+  $pluginRoot = Get-LocalMediaIoPluginRoot
+  $sourceRoot = $null
+
+  foreach ($candidate in Get-MediaIoPluginSourceCandidates) {
+    if (Test-Path (Join-Path $candidate ".codex-plugin\plugin.json")) {
+      $sourceRoot = $candidate
+      break
+    }
+  }
+
+  $tmpDir = $null
+  if ($null -eq $sourceRoot) {
+    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) "mediaio-plugin-$PID"
+    New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+    $archivePath = Join-Path $tmpDir "mediaio-plugin.zip"
+    Write-Host "  Downloading Media.io plugin source from $MediaIoPluginArchiveUrl" -ForegroundColor DarkGray
+    Invoke-WebRequest -Uri $MediaIoPluginArchiveUrl -OutFile $archivePath -UseBasicParsing
+    Expand-Archive -Path $archivePath -DestinationPath $tmpDir -Force
+    foreach ($candidate in Get-ChildItem -Path $tmpDir -Directory -Recurse -ErrorAction SilentlyContinue) {
+      if (Test-Path (Join-Path $candidate.FullName ".codex-plugin\plugin.json")) {
+        $sourceRoot = $candidate.FullName
+        break
+      }
+    }
+  }
+
+  if ($null -eq $sourceRoot) {
+    throw "Media.io plugin source with .codex-plugin\plugin.json was not found."
   }
 
   New-Item -ItemType Directory -Force -Path $pluginRoot | Out-Null
-  Copy-Item -Path (Join-Path $sourceRoot "*") -Destination $pluginRoot -Recurse -Force
+  try {
+    $sourceManifest = Join-Path $sourceRoot ".codex-plugin\plugin.json"
+    if (-not (Test-Path $sourceManifest)) {
+      throw "Media.io plugin source is missing .codex-plugin\plugin.json."
+    }
 
-  $sourceManifest = Join-Path $sourceRoot ".codex-plugin\plugin.json"
-  if (-not (Test-Path $sourceManifest)) {
-    throw "Media.io marketplace checkout is missing .codex-plugin\plugin.json."
+    $sourceFullPath = [System.IO.Path]::GetFullPath($sourceRoot).TrimEnd('\', '/')
+    $pluginFullPath = [System.IO.Path]::GetFullPath($pluginRoot).TrimEnd('\', '/')
+    if (-not [string]::Equals($sourceFullPath, $pluginFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+      Get-ChildItem -LiteralPath $sourceRoot -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $pluginRoot -Recurse -Force
+      }
+    }
+
+    Copy-Item -LiteralPath $sourceManifest -Destination (Join-Path $pluginRoot "plugin.json") -Force
+    return $pluginRoot
+  } finally {
+    if ($tmpDir -and (Test-Path $tmpDir)) {
+      Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
-
-  Copy-Item -LiteralPath $sourceManifest -Destination (Join-Path $pluginRoot "plugin.json") -Force
-  return $pluginRoot
 }
 
 function Initialize-PersonalMarketplaceFallback {
   $marketplacePath = Get-PersonalMarketplacePath
   $marketplaceName = Get-PersonalMarketplaceName
-  $displayName = Format-DisplayNameFromName $marketplaceName
+  $displayName = Format-DisplayNameFromName -Name $marketplaceName
   $payload = $null
 
   if (Test-Path $marketplacePath) {
-    $payload = Get-Content -Raw -LiteralPath $marketplacePath | ConvertFrom-Json
+    try {
+      $payload = Get-Content -Raw -LiteralPath $marketplacePath | ConvertFrom-Json
+    } catch {
+      Add-Warning "Personal marketplace file exists but could not be parsed cleanly. It will be recreated."
+      $payload = $null
+    }
   }
 
   if (-not $payload) {
@@ -343,21 +1070,23 @@ function Initialize-PersonalMarketplaceFallback {
     }
   }
 
-  if ([string]::IsNullOrWhiteSpace([string]$payload.name)) {
-    $payload.name = $marketplaceName
+  if (-not (Test-ObjectProperty -InputObject $payload -Name "name") -or
+      [string]::IsNullOrWhiteSpace([string]$payload.name)) {
+    Set-ObjectProperty -InputObject $payload -Name "name" -Value $marketplaceName
   }
-  if (-not $payload.interface) {
-    $payload.interface = [ordered]@{}
+  if (-not (Test-ObjectProperty -InputObject $payload -Name "interface") -or -not $payload.interface) {
+    Set-ObjectProperty -InputObject $payload -Name "interface" -Value ([ordered]@{})
   }
-  if ([string]::IsNullOrWhiteSpace([string]$payload.interface.displayName)) {
-    $payload.interface.displayName = $displayName
+  if (-not (Test-ObjectProperty -InputObject $payload.interface -Name "displayName") -or
+      [string]::IsNullOrWhiteSpace([string]$payload.interface.displayName)) {
+    Set-ObjectProperty -InputObject $payload.interface -Name "displayName" -Value $displayName
   }
-  if (-not $payload.plugins) {
-    $payload.plugins = @()
+  if (-not (Test-ObjectProperty -InputObject $payload -Name "plugins") -or -not $payload.plugins) {
+    Set-ObjectProperty -InputObject $payload -Name "plugins" -Value ([object[]]@())
   }
 
   $newEntry = [ordered]@{
-    name = "media-io"
+    name = $MediaIoCodexPluginName
     source = [ordered]@{
       source = "local"
       path = "./plugins/media-io"
@@ -371,16 +1100,12 @@ function Initialize-PersonalMarketplaceFallback {
 
   $plugins = @()
   foreach ($entry in @($payload.plugins)) {
-    if ($null -eq $entry) {
-      continue
-    }
-    if ($entry.name -eq "media-io") {
-      continue
-    }
+    if ($null -eq $entry) { continue }
+    if ((Test-ObjectProperty -InputObject $entry -Name "name") -and $entry.name -eq $MediaIoCodexPluginName) { continue }
     $plugins += $entry
   }
   $plugins += $newEntry
-  $payload.plugins = $plugins
+  Set-ObjectProperty -InputObject $payload -Name "plugins" -Value ([object[]]$plugins)
 
   Write-JsonNoBom -Path $marketplacePath -InputObject $payload
   Initialize-LocalMediaIoPluginRoot | Out-Null
@@ -389,6 +1114,8 @@ function Initialize-PersonalMarketplaceFallback {
 
 function Get-CodexAvailablePluginIds {
   $raw = (& cmd /c "codex plugin list --json --available" | Out-String)
+  if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
+
   $parsed = $raw | ConvertFrom-Json
   return @($parsed.available | ForEach-Object { $_.pluginId })
 }
@@ -396,24 +1123,42 @@ function Get-CodexAvailablePluginIds {
 function Get-CodexPluginCacheRoot {
   param([Parameter(Mandatory = $true)][string]$MarketplaceName)
 
+  $version = Get-CodexMediaIoPluginVersion
+  return (Join-Path $env:USERPROFILE ".codex\plugins\cache\$MarketplaceName\$MediaIoCodexPluginName\$version")
+}
+
+function Get-ClaudePluginCacheRoot {
   $version = Get-MediaIoPluginVersion
-  return (Join-Path $env:USERPROFILE ".codex\plugins\cache\$MarketplaceName\media-io\$version")
+  return (Join-Path $env:USERPROFILE ".claude\plugins\cache\media-io\media-io\$version")
+}
+
+function Get-ClaudeMarketplaceIds {
+  $raw = (& cmd /c "claude plugin marketplace list --json" | Out-String)
+  if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
+
+  $parsed = $raw | ConvertFrom-Json
+  return @($parsed | ForEach-Object { $_.name })
 }
 
 Write-Host "Media.io setup script" -ForegroundColor White
-Write-Host "This script prints each step, checks the result, and reports failures at the end." -ForegroundColor DarkGray
+Write-Host "This script installs the Media.io plugin, CLI, and skills. CLI and skills prefer direct package/local installers and fall back to npm/npx only when needed." -ForegroundColor DarkGray
 
-Invoke-CheckedStep "Preflight: ensure Node.js and npm" {
+Invoke-OptionalHostDetection "Preflight: locate claude" "claude" {
+  param([bool]$Available)
+  $script:ClaudeAvailable = $Available
+}
+
+Invoke-OptionalHostDetection "Preflight: locate codex" "codex" {
+  param([bool]$Available)
+  $script:CodexAvailable = $Available
+}
+
+Invoke-OptionalFallbackStep "Install Media.io CLI" {
+  Install-MediaIoCliFromNpmPackage
+} {
   Ensure-NodeAndNpm
-} -SuccessMessage "Node.js, npm, and npx are available"
-
-Invoke-CheckedStep "Preflight: locate codex" {
-  & cmd /c "where codex"
-} -SuccessMessage "codex is available"
-
-Invoke-CheckedStep "Install Media.io CLI" {
-  & cmd /c "npm i -g @mediaio/cli"
-} -Verify {
+  & cmd /c "npm i -g $MediaIoPackageName"
+} {
   & cmd /c "mediaio version"
 } -SuccessMessage "Media.io CLI is installed"
 
@@ -421,72 +1166,138 @@ Invoke-CheckedStep "Run Media.io doctor" {
   & cmd /c "mediaio doctor"
 } -SuccessMessage "local Media.io checks passed"
 
-Invoke-CheckedStep "Add Media.io marketplace" {
-  & cmd /c "codex plugin marketplace add media-io/plugin"
-} -SuccessMessage "marketplace is registered"
+if ($script:ClaudeAvailable) {
+  Invoke-CheckedStep "Add Media.io marketplace" {
+    & cmd /c "claude plugin marketplace add $MediaIoMarketplaceSource"
+  } -SuccessMessage "marketplace is registered"
 
-Invoke-CheckedStep "Refresh Media.io marketplace" {
-  & cmd /c "codex plugin marketplace upgrade media-io"
-} -SuccessMessage "marketplace is refreshed"
+  Invoke-CheckedStep "Refresh Media.io marketplace" {
+    & cmd /c "claude plugin marketplace update media-io"
+  } -SuccessMessage "marketplace is refreshed"
 
-Invoke-CheckedStep "Verify marketplace visibility" {
-  $availableIds = Get-CodexAvailablePluginIds
-  if ($availableIds -contains "media-io@media-io") {
-    Write-Host "  OK: Codex can see media-io in the git marketplace snapshot" -ForegroundColor Green
-  } else {
-    $script:UsePersonalMarketplaceFallback = $true
-    Add-Warning "Codex does not surface media-io from the git marketplace snapshot on this build. I will fall back to the personal marketplace."
-  }
-} -SuccessMessage "Marketplace lookup finished"
-
-Invoke-CheckedStep "Install Codex plugin" {
-  $installedMarketplaceName = "media-io"
-
-  if (-not $script:UsePersonalMarketplaceFallback) {
-    & cmd /c "codex plugin add media-io@media-io"
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Get-CodexPluginCacheRoot -MarketplaceName "media-io"))) {
-      Add-Warning "The git marketplace install did not leave an installable cache root. Switching to the personal marketplace fallback."
-      $script:UsePersonalMarketplaceFallback = $true
+  Invoke-CheckedStep "Verify marketplace visibility" {
+    $availableIds = Get-ClaudeMarketplaceIds
+    if ($availableIds -contains "media-io") {
+      Write-Host "  OK: Claude Code can see media-io in the configured marketplaces" -ForegroundColor Green
     } else {
-      $script:ResolvedCodexMarketplaceName = "media-io"
+      Add-Warning "Claude Code does not surface media-io from the configured marketplaces on this build."
     }
-  }
+  } -SuccessMessage "Marketplace lookup finished"
 
-  if ($script:UsePersonalMarketplaceFallback) {
-    $installedMarketplaceName = Initialize-PersonalMarketplaceFallback
-    & cmd /c "codex plugin add media-io@$installedMarketplaceName"
+  Invoke-CheckedStep "Install Claude Code plugin" {
+    & cmd /c "claude plugin install $MediaIoClaudePluginId -s user -y"
     if ($LASTEXITCODE -ne 0) {
-      throw "codex plugin add media-io@$installedMarketplaceName failed."
+      throw "claude plugin install $MediaIoClaudePluginId failed."
     }
-    if (-not (Test-Path (Get-CodexPluginCacheRoot -MarketplaceName $installedMarketplaceName))) {
-      throw "Codex plugin cache root was not created for marketplace '$installedMarketplaceName'."
+    if (-not (Test-Path (Get-ClaudePluginCacheRoot))) {
+      throw "Claude Code plugin cache root was not created."
     }
-    $script:ResolvedCodexMarketplaceName = $installedMarketplaceName
-  }
-} -SuccessMessage "Codex plugin install completed"
+    $script:ResolvedClaudeMarketplaceName = "media-io"
+  } -SuccessMessage "Claude Code plugin install completed"
 
-Invoke-CheckedStep "Verify Codex plugin cache" {
-  if ([string]::IsNullOrWhiteSpace([string]$script:ResolvedCodexMarketplaceName)) {
-    throw "Codex marketplace name was not recorded."
+  Invoke-CheckedStep "Verify Claude Code plugin cache" {
+    if ([string]::IsNullOrWhiteSpace([string]$script:ResolvedClaudeMarketplaceName)) {
+      throw "Claude marketplace name was not recorded."
+    }
+
+    $cacheRoot = Get-ClaudePluginCacheRoot
+    if (-not (Test-Path $cacheRoot)) {
+      throw "Claude Code plugin cache root is missing: $cacheRoot"
+    }
+
+    $raw = (& cmd /c "claude plugin list --json" | Out-String)
+    $parsed = $raw | ConvertFrom-Json
+    $ids = @($parsed | ForEach-Object { $_.id })
+    if ($ids -notcontains $MediaIoClaudePluginId) {
+      Add-Warning "Claude Code does not currently list $MediaIoClaudePluginId in the installed plugin list, but the cache root exists."
+    } else {
+      Write-Host "  OK: Claude Code lists $MediaIoClaudePluginId as installed" -ForegroundColor Green
+    }
+  } -SuccessMessage "Claude Code plugin cache is present"
+}
+
+if ($script:CodexAvailable) {
+  if (-not (Invoke-SoftStep "Add Media.io Codex marketplace" {
+    & cmd /c "codex plugin marketplace add $MediaIoMarketplaceSource"
+  } -SuccessMessage "Codex marketplace is registered")) {
+    $script:UseCodexPersonalMarketplaceFallback = $true
   }
 
-  $cacheRoot = Get-CodexPluginCacheRoot -MarketplaceName $script:ResolvedCodexMarketplaceName
-  if (-not (Test-Path $cacheRoot)) {
-    throw "Codex plugin cache root is missing: $cacheRoot"
+  if (-not $script:UseCodexPersonalMarketplaceFallback) {
+    if (-not (Invoke-SoftStep "Refresh Media.io Codex marketplace" {
+      & cmd /c "codex plugin marketplace upgrade $MediaIoCodexMarketplaceName"
+    } -SuccessMessage "Codex marketplace is refreshed")) {
+      $script:UseCodexPersonalMarketplaceFallback = $true
+    }
   }
 
-  $raw = (& cmd /c "codex plugin list --json --available" | Out-String)
-  $parsed = $raw | ConvertFrom-Json
-  $availableIds = @($parsed.available | ForEach-Object { $_.pluginId })
-  $expectedId = "media-io@$($script:ResolvedCodexMarketplaceName)"
-  if ($availableIds -notcontains $expectedId) {
-    Add-Warning "Codex does not currently list $expectedId in the available plugin list, but the cache root exists."
-  } else {
-    Write-Host "  OK: Codex lists $expectedId as available" -ForegroundColor Green
+  if (-not $script:UseCodexPersonalMarketplaceFallback) {
+    if (-not (Invoke-SoftStep "Verify Codex marketplace visibility" {
+      $availableIds = Get-CodexAvailablePluginIds
+      $expectedId = "$MediaIoCodexPluginName@$MediaIoCodexMarketplaceName"
+      if ($availableIds -contains $expectedId) {
+        Write-Host "  OK: Codex can see $expectedId in the git marketplace snapshot" -ForegroundColor Green
+      } else {
+        throw "Codex does not surface $expectedId from the git marketplace snapshot on this build."
+      }
+    } -SuccessMessage "Codex marketplace lookup finished")) {
+      $script:UseCodexPersonalMarketplaceFallback = $true
+    }
   }
-} -SuccessMessage "Codex plugin cache is present"
 
-Invoke-SkillInstall | Out-Null
+  Invoke-CheckedStep "Install Codex plugin" {
+    $installedMarketplaceName = $MediaIoCodexMarketplaceName
+
+    if (-not $script:UseCodexPersonalMarketplaceFallback) {
+      & cmd /c "codex plugin add $MediaIoCodexPluginName@$MediaIoCodexMarketplaceName"
+      if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Get-CodexPluginCacheRoot -MarketplaceName $MediaIoCodexMarketplaceName))) {
+        Add-Warning "The Codex git marketplace install did not leave an installable cache root. Switching to the personal marketplace fallback."
+        $script:UseCodexPersonalMarketplaceFallback = $true
+      } else {
+        $script:ResolvedCodexMarketplaceName = $MediaIoCodexMarketplaceName
+      }
+    }
+
+    if ($script:UseCodexPersonalMarketplaceFallback) {
+      $installedMarketplaceName = Initialize-PersonalMarketplaceFallback
+      & cmd /c "codex plugin add $MediaIoCodexPluginName@$installedMarketplaceName"
+      if ($LASTEXITCODE -ne 0) {
+        throw "codex plugin add $MediaIoCodexPluginName@$installedMarketplaceName failed."
+      }
+      if (-not (Test-Path (Get-CodexPluginCacheRoot -MarketplaceName $installedMarketplaceName))) {
+        throw "Codex plugin cache root was not created for marketplace '$installedMarketplaceName'."
+      }
+      $script:ResolvedCodexMarketplaceName = $installedMarketplaceName
+    }
+  } -SuccessMessage "Codex plugin install completed"
+
+  Invoke-CheckedStep "Verify Codex plugin cache" {
+    if ([string]::IsNullOrWhiteSpace([string]$script:ResolvedCodexMarketplaceName)) {
+      throw "Codex marketplace name was not recorded."
+    }
+
+    $cacheRoot = Get-CodexPluginCacheRoot -MarketplaceName $script:ResolvedCodexMarketplaceName
+    if (-not (Test-Path $cacheRoot)) {
+      throw "Codex plugin cache root is missing: $cacheRoot"
+    }
+
+    $expectedId = "$MediaIoCodexPluginName@$($script:ResolvedCodexMarketplaceName)"
+    try {
+      $availableIds = Get-CodexAvailablePluginIds
+      if ($availableIds -notcontains $expectedId) {
+        Add-Warning "Codex does not currently list $expectedId in the available plugin list, but the cache root exists."
+      } else {
+        Write-Host "  OK: Codex lists $expectedId as available" -ForegroundColor Green
+      }
+      $global:LASTEXITCODE = 0
+    } catch {
+      Add-Warning "Codex available plugin list could not be read, but the Media.io plugin cache root exists: $($_.Exception.Message)"
+      $global:LASTEXITCODE = 0
+    }
+  } -SuccessMessage "Codex plugin cache is present"
+}
+
+Invoke-MediaIoSkillInstall | Out-Null
 
 Write-Step "Final verification"
 
@@ -495,7 +1306,8 @@ try {
   if ([string]::IsNullOrWhiteSpace($raw)) {
     throw "mediaio version returned no output."
   }
-  Write-Host "  OK: mediaio version responded" -ForegroundColor Green
+  Test-MediaIoSkillsInstalled
+  Write-Host "  OK: mediaio version responded and skills are present" -ForegroundColor Green
 } catch {
   Add-Failure "Final verification - $($_.Exception.Message)"
 }
