@@ -410,6 +410,28 @@ function Remove-SkillDirectories {
   }
 }
 
+function Invoke-MediaIoSkillRemove {
+  if (Test-CommandAvailable "npx") {
+    try {
+      $global:LASTEXITCODE = 0
+      $raw = (& cmd /c "npx --yes skills remove mediaio-generate mediaio-install -g -a codex -a claude-code -y" 2>&1 | Out-String)
+      if ($LASTEXITCODE -eq 0) {
+        Write-Host "  OK: npx skills remove mediaio-generate mediaio-install" -ForegroundColor Green
+      } else {
+        Add-Warning "npx skills remove returned exit code $LASTEXITCODE. Falling back to direct directory removal. $raw"
+      }
+    } catch {
+      Add-Warning "npx skills remove failed. Falling back to direct directory removal. $($_.Exception.Message)"
+    } finally {
+      $global:LASTEXITCODE = 0
+    }
+  } else {
+    Add-Warning "npx is not available; removing Media.io skill directories directly."
+  }
+
+  Remove-SkillDirectories
+}
+
 function Test-SkillDirectoriesAbsent {
   foreach ($skillRoot in Get-MediaIoSkillRoots) {
     if (Test-Path $skillRoot) { return $false }
@@ -476,7 +498,7 @@ Invoke-CheckedStep "Remove Codex plugin" {
 } -SuccessMessage "Codex plugin removed"
 
 Invoke-CheckedStep "Remove Media.io skills" {
-  Remove-SkillDirectories
+  Invoke-MediaIoSkillRemove
 } -Verify {
   if (-not (Test-SkillDirectoriesAbsent)) {
     throw "Some Media.io skill directories are still present."

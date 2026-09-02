@@ -13,6 +13,8 @@ $script:ResolvedCodexMarketplaceName = $null
 $script:ResolvedMediaIoSkillSource = $null
 $script:ClaudeAvailable = $false
 $script:CodexAvailable = $false
+$script:ClaudePluginInstalled = $false
+$script:CodexPluginInstalled = $false
 
 $MediaIoPackageName = if ($env:MEDIAIO_NPM_PACKAGE) { $env:MEDIAIO_NPM_PACKAGE } else { "@mediaio/cli" }
 $MediaIoMarketplaceSource = if ($env:MEDIAIO_MARKETPLACE_SOURCE) { $env:MEDIAIO_MARKETPLACE_SOURCE } else { "media-io/plugin" }
@@ -429,6 +431,47 @@ function Assert-NpmPackageIntegrityIfAvailable {
   Add-Warning "npm metadata did not include dist.integrity or dist.shasum, so package verification is skipped."
 }
 
+function Get-WindowsTarPath {
+  $systemTarCandidates = @()
+  if (-not [string]::IsNullOrWhiteSpace($env:WINDIR)) {
+    $systemTarCandidates += Join-Path $env:WINDIR "Sysnative\tar.exe"
+    $systemTarCandidates += Join-Path $env:WINDIR "System32\tar.exe"
+  }
+
+  foreach ($candidate in $systemTarCandidates) {
+    if (Test-Path $candidate) { return $candidate }
+  }
+
+  $command = Get-Command "tar.exe" -ErrorAction SilentlyContinue
+  if ($command -and -not [string]::IsNullOrWhiteSpace([string]$command.Source)) {
+    $source = [string]$command.Source
+    if ($source -notmatch "\\Git\\usr\\bin\\tar\.exe$") { return $source }
+  }
+
+  $command = Get-Command "tar" -ErrorAction SilentlyContinue
+  if ($command -and -not [string]::IsNullOrWhiteSpace([string]$command.Source)) {
+    $source = [string]$command.Source
+    if ($source -notmatch "\\Git\\usr\\bin\\tar\.exe$") { return $source }
+  }
+
+  throw "Windows tar.exe was not found. Windows 10+ should include C:\Windows\System32\tar.exe; Git Bash tar is not supported for this installer."
+}
+
+function Expand-TarGzArchive {
+  param(
+    [Parameter(Mandatory = $true)][string]$ArchivePath,
+    [Parameter(Mandatory = $true)][string]$Destination
+  )
+
+  New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+  $tarPath = Get-WindowsTarPath
+  Write-Host "  Extracting with $tarPath" -ForegroundColor DarkGray
+  & $tarPath -xzf $ArchivePath -C $Destination
+  if ($LASTEXITCODE -ne 0) {
+    throw "tar failed to extract $(Split-Path $ArchivePath -Leaf)."
+  }
+}
+
 function Install-MediaIoExeFromArchive {
   param(
     [Parameter(Mandatory = $true)][string]$AssetPath,
@@ -446,11 +489,7 @@ function Install-MediaIoExeFromArchive {
     if ($null -eq $binFile) { throw "Could not find mediaio.exe in $AssetName." }
     $sourceExe = $binFile.FullName
   } elseif ($assetNameLower.EndsWith(".tar.gz") -or $assetNameLower.EndsWith(".tgz")) {
-    New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
-    & tar -xzf $AssetPath -C $extractRoot
-    if ($LASTEXITCODE -ne 0) {
-      throw "tar failed to extract $AssetName."
-    }
+    Expand-TarGzArchive -ArchivePath $AssetPath -Destination $extractRoot
     $binFile = Get-ChildItem -Path $extractRoot -Recurse -Filter "mediaio.exe" | Select-Object -First 1
     if ($null -eq $binFile) { throw "Could not find mediaio.exe in $AssetName." }
     $sourceExe = $binFile.FullName
@@ -615,11 +654,7 @@ function Install-MediaIoCliFromRelease {
       if ($null -eq $binFile) { throw "Could not find mediaio.exe in $assetName." }
       $sourceExe = $binFile.FullName
     } elseif ($assetName.ToLower().EndsWith(".tar.gz") -or $assetName.ToLower().EndsWith(".tgz")) {
-      New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
-      & tar -xzf $assetPath -C $extractRoot
-      if ($LASTEXITCODE -ne 0) {
-        throw "tar failed to extract $assetName."
-      }
+      Expand-TarGzArchive -ArchivePath $assetPath -Destination $extractRoot
       $binFile = Get-ChildItem -Path $extractRoot -Recurse -Filter "mediaio.exe" | Select-Object -First 1
       if ($null -eq $binFile) { throw "Could not find mediaio.exe in $assetName." }
       $sourceExe = $binFile.FullName
@@ -855,6 +890,49 @@ function Invoke-MediaIoSkillInstall {
   } {
     Test-MediaIoSkillsInstalled
   } -SuccessMessage "Media.io skills are installed"
+}
+
+function Test-MediaIoPluginInstalled {
+  $installed = $false
+
+  if ($script:ClaudePluginInstalled) {
+    $cacheRoot = Get-ClaudePluginCacheRoot
+    if (-not (Test-Path $cacheRoot)) {
+      throw "Claude Code plugin cache root is missing: $cacheRoot"
+    }
+    $installed = $true
+  }
+
+  if ($script:CodexPluginInstalled) {
+    $cacheRoot = Get-CodexPluginCacheRoot -MarketplaceName $script:ResolvedCodexMarketplaceName
+    if (-not (Test-Path $cacheRoot)) {
+      throw "Codex plugin cache root is missing: $cacheRoot"
+    }
+    $installed = $true
+  }
+
+  return $installed
+}
+
+function Test-MediaIoIntegrationInstalled {
+  if (Test-MediaIoPluginInstalled) { return }
+  Test-MediaIoSkillsInstalled
+}
+
+function Remove-DirectMediaIoSkillsIfPresent {
+  $paths = @(
+    (Join-Path $HOME ".codex\skills\mediaio-generate"),
+    (Join-Path $HOME ".codex\skills\mediaio-install"),
+    (Join-Path $HOME ".claude\skills\mediaio-generate"),
+    (Join-Path $HOME ".claude\skills\mediaio-install")
+  )
+
+  foreach ($path in $paths) {
+    if (Test-Path $path) {
+      Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+      Write-Host "  Removed duplicate direct skill: $path" -ForegroundColor DarkGray
+    }
+  }
 }
 
 function Get-MediaIoPluginVersion {
@@ -1193,6 +1271,7 @@ if ($script:ClaudeAvailable) {
       throw "Claude Code plugin cache root was not created."
     }
     $script:ResolvedClaudeMarketplaceName = "media-io"
+    $script:ClaudePluginInstalled = $true
   } -SuccessMessage "Claude Code plugin install completed"
 
   Invoke-CheckedStep "Verify Claude Code plugin cache" {
@@ -1255,6 +1334,7 @@ if ($script:CodexAvailable) {
         $script:UseCodexPersonalMarketplaceFallback = $true
       } else {
         $script:ResolvedCodexMarketplaceName = $MediaIoCodexMarketplaceName
+        $script:CodexPluginInstalled = $true
       }
     }
 
@@ -1268,6 +1348,7 @@ if ($script:CodexAvailable) {
         throw "Codex plugin cache root was not created for marketplace '$installedMarketplaceName'."
       }
       $script:ResolvedCodexMarketplaceName = $installedMarketplaceName
+      $script:CodexPluginInstalled = $true
     }
   } -SuccessMessage "Codex plugin install completed"
 
@@ -1297,7 +1378,13 @@ if ($script:CodexAvailable) {
   } -SuccessMessage "Codex plugin cache is present"
 }
 
-Invoke-MediaIoSkillInstall | Out-Null
+if ($script:ClaudePluginInstalled -or $script:CodexPluginInstalled) {
+  Write-Step "Skip direct Media.io skills install"
+  Remove-DirectMediaIoSkillsIfPresent
+  Write-Host "  OK: plugin-provided skills are installed; direct skills install is skipped to avoid duplicate entries" -ForegroundColor Green
+} else {
+  Invoke-MediaIoSkillInstall | Out-Null
+}
 
 Write-Step "Final verification"
 
@@ -1306,8 +1393,8 @@ try {
   if ([string]::IsNullOrWhiteSpace($raw)) {
     throw "mediaio version returned no output."
   }
-  Test-MediaIoSkillsInstalled
-  Write-Host "  OK: mediaio version responded and skills are present" -ForegroundColor Green
+  Test-MediaIoIntegrationInstalled
+  Write-Host "  OK: mediaio version responded and Media.io integration is present" -ForegroundColor Green
 } catch {
   Add-Failure "Final verification - $($_.Exception.Message)"
 }
