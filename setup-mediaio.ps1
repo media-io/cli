@@ -1,6 +1,6 @@
 # Media.io setup script for Windows.
 # Installs the Media.io plugin, CLI, and skills in one pass.
-# CLI and skills prefer direct package/local installers and fall back to npm/npx only when needed.
+# CLI prefers npm and falls back to a release archive; skills prefer local installers and fall back to npm/npx only when needed.
 #
 # Usage (from an existing PowerShell session):
 #   irm https://raw.githubusercontent.com/<owner>/<repo>/main/setup-mediaio.ps1 | iex
@@ -82,20 +82,70 @@ function Add-DirectoryToPath {
   return $true
 }
 
+function Get-UserEnvironmentPathValue {
+  $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $false)
+  if ($null -eq $key) { return "" }
+  try {
+    $value = $key.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    return [string]$value
+  } finally {
+    $key.Close()
+  }
+}
+
+function Set-UserEnvironmentPathValue {
+  param([Parameter(Mandatory = $true)][string]$Value)
+
+  $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("Environment")
+  if ($null -eq $key) {
+    throw "Could not open HKCU\Environment for writing."
+  }
+
+  try {
+    $key.SetValue("Path", $Value, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+  } finally {
+    $key.Close()
+  }
+}
+
+function Broadcast-EnvironmentChange {
+  if (-not ("User32.NativeMethods" -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+namespace User32 {
+  public static class NativeMethods {
+    [DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern IntPtr SendMessageTimeout(IntPtr hWnd, int Msg, IntPtr wParam, string lParam, int flags, int timeout, out IntPtr result);
+  }
+}
+"@
+  }
+
+  $HWND_BROADCAST = [IntPtr]0xffff
+  $WM_SETTINGCHANGE = 0x001A
+  $SMTO_ABORTIFHUNG = 0x0002
+  $result = [IntPtr]::Zero
+  [void][User32.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [IntPtr]::Zero, "Environment", $SMTO_ABORTIFHUNG, 5000, [ref]$result)
+}
+
 function Add-DirectoryToUserPath {
   param([Parameter(Mandatory = $true)][string]$Directory)
   if (-not (Test-Path $Directory)) { return }
 
   [void](Add-DirectoryToPath -Directory $Directory)
-  $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+  $userPath = Get-UserEnvironmentPathValue
   $segments = @($userPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
   if ($segments -contains $Directory) { return }
 
   if ([string]::IsNullOrWhiteSpace($userPath)) {
-    [Environment]::SetEnvironmentVariable("PATH", $Directory, "User")
+    Set-UserEnvironmentPathValue -Value $Directory
   } else {
-    [Environment]::SetEnvironmentVariable("PATH", "$Directory;$userPath", "User")
+    Set-UserEnvironmentPathValue -Value "$Directory;$userPath"
   }
+
+  Broadcast-EnvironmentChange
 }
 
 function Repair-NodePathFromCommonLocations {
@@ -408,6 +458,10 @@ function Resolve-MediaIoVersionFromNpm {
   Write-Host "  Resolved Media.io CLI npm release to $($packageInfo.Version)" -ForegroundColor DarkGray
 }
 
+function Get-NpmGlobalBinDir {
+  return [string]((npm prefix -g) | Out-String).Trim()
+}
+
 function Get-MediaIoReleaseTag {
   if ($script:MediaIoVersion.StartsWith("v")) { return $script:MediaIoVersion }
   return "v$script:MediaIoVersion"
@@ -524,64 +578,38 @@ function Install-MediaIoExeFromArchive {
 }
 
 function Install-MediaIoCliFromNpmPackage {
-  if ($env:MEDIAIO_BINARY_URL) {
-    Install-MediaIoCliFromRelease
-    return
+  $npmInstallOutput = ""
+  try {
+    $npmInstallOutput = (& cmd /c "npm install -g $MediaIoPackageName" 2>&1 | Out-String)
+  } catch {
+    $npmInstallOutput = $_.Exception.Message
   }
 
-  Resolve-MediaIoVersionFromNpm
-  Install-MediaIoCliFromRelease
+  if ($LASTEXITCODE -ne 0) {
+    throw "npm install -g $MediaIoPackageName failed. $npmInstallOutput"
+  }
+
+  $npmBinDir = Get-NpmGlobalBinDir
+  if (-not [string]::IsNullOrWhiteSpace($npmBinDir)) {
+    Add-DirectoryToUserPath -Directory $npmBinDir
+  }
 }
 
 function Resolve-MediaIoLatestVersion {
   if ($script:MediaIoVersion -ne "latest") { return }
 
-  $releasesApiUrl = "https://api.github.com/repos/$MediaIoReleaseRepo/releases"
+  $latestApiUrl = "https://api.github.com/repos/$MediaIoReleaseRepo/releases/latest"
   try {
-    $releases = Invoke-RestMethod -Uri $releasesApiUrl -UseBasicParsing -ErrorAction Stop
-    $candidates = @()
-    foreach ($release in @($releases)) {
-      if ($release.draft -or $release.prerelease) { continue }
-      $tag = [string]$release.tag_name
-      if ($tag -notmatch '^v?(\d+\.\d+\.\d+)$') { continue }
-      $candidates += [pscustomobject]@{
-        Tag = $tag
-        Version = [version]$Matches[1]
-      }
-    }
-
-    if ($candidates.Count -gt 0) {
-      $selected = $candidates | Sort-Object -Property Version -Descending | Select-Object -First 1
-      $script:MediaIoVersion = $selected.Tag
+    $latestRelease = Invoke-RestMethod -Uri $latestApiUrl -UseBasicParsing -ErrorAction Stop
+    $tag = [string]$latestRelease.tag_name
+    if (-not [string]::IsNullOrWhiteSpace($tag)) {
+      $script:MediaIoVersion = $tag
       Write-Host "  Resolved latest Media.io CLI release to $script:MediaIoVersion" -ForegroundColor DarkGray
       return
     }
   } catch {
     Add-Warning "Could not resolve latest Media.io CLI version from GitHub releases API: $($_.Exception.Message)"
   }
-
-  $latestUrl = "https://github.com/$MediaIoReleaseRepo/releases/latest"
-  try {
-    Invoke-WebRequest -Uri $latestUrl -MaximumRedirection 0 -ErrorAction SilentlyContinue -UseBasicParsing 2>$null | Out-Null
-  } catch {
-    if ($_.Exception.Response.Headers.Location) {
-      $location = $_.Exception.Response.Headers.Location.ToString()
-      $script:MediaIoVersion = ($location -split "/tag/")[-1].Trim()
-      return
-    }
-  }
-
-  try {
-    $response = Invoke-WebRequest -Uri $latestUrl -UseBasicParsing -ErrorAction Stop
-    if ($response.BaseResponse.ResponseUri) {
-      $script:MediaIoVersion = ($response.BaseResponse.ResponseUri.ToString() -split "/tag/")[-1].Trim()
-      return
-    }
-    if ($response.BaseResponse.RequestMessage.RequestUri) {
-      $script:MediaIoVersion = ($response.BaseResponse.RequestMessage.RequestUri.ToString() -split "/tag/")[-1].Trim()
-      return
-    }
-  } catch {}
 
   throw "Could not determine the latest Media.io CLI release version. Set MEDIAIO_VERSION explicitly."
 }
@@ -952,18 +980,30 @@ function Remove-DirectMediaIoSkillsIfPresent {
   }
 }
 
+function Get-MediaIoPluginManifestCandidates {
+  $manifests = New-Object System.Collections.Generic.List[string]
+  foreach ($root in (Get-MediaIoPluginSourceCandidates)) {
+    $manifests.Add((Join-Path $root ".claude-plugin\plugin.json"))
+    $manifests.Add((Join-Path $root ".codex-plugin\plugin.json"))
+    $manifests.Add((Join-Path $root "plugin.json"))
+  }
+
+  $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  return @($manifests | Where-Object {
+    -not [string]::IsNullOrWhiteSpace($_) -and $seen.Add([System.IO.Path]::GetFullPath($_))
+  })
+}
+
 function Get-MediaIoPluginVersion {
-  $manifestPath = Join-Path $PSScriptRoot ".claude-plugin\plugin.json"
-  if (-not (Test-Path $manifestPath)) {
-    throw "Media.io plugin manifest not found at $manifestPath."
+  foreach ($manifestPath in (Get-MediaIoPluginManifestCandidates)) {
+    if (-not (Test-Path $manifestPath)) { continue }
+    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+    if (-not [string]::IsNullOrWhiteSpace([string]$manifest.version)) {
+      return [string]$manifest.version
+    }
   }
 
-  $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-  if ([string]::IsNullOrWhiteSpace([string]$manifest.version)) {
-    throw "Media.io plugin manifest does not declare a version."
-  }
-
-  return [string]$manifest.version
+  throw "Media.io plugin manifest does not declare a version."
 }
 
 function Get-CodexMarketplaceCheckoutRoot {
@@ -1236,7 +1276,7 @@ function Get-ClaudeMarketplaceIds {
 }
 
 Write-Host "Media.io setup script" -ForegroundColor White
-Write-Host "This script installs the Media.io plugin, CLI, and skills. CLI and skills prefer direct package/local installers and fall back to npm/npx only when needed." -ForegroundColor DarkGray
+Write-Host "This script installs the Media.io plugin, CLI, and skills. The CLI prefers npm and falls back to a release archive; skills prefer local installers and fall back to npm/npx only when needed." -ForegroundColor DarkGray
 
 Invoke-OptionalHostDetection "Preflight: locate claude" "claude" {
   param([bool]$Available)
@@ -1249,10 +1289,10 @@ Invoke-OptionalHostDetection "Preflight: locate codex" "codex" {
 }
 
 Invoke-OptionalFallbackStep "Install Media.io CLI" {
+  Ensure-NodeAndNpm
   Install-MediaIoCliFromNpmPackage
 } {
-  Ensure-NodeAndNpm
-  & cmd /c "npm i -g $MediaIoPackageName"
+  Install-MediaIoCliFromRelease
 } {
   & cmd /c "mediaio version"
 } -SuccessMessage "Media.io CLI is installed"
@@ -1284,9 +1324,6 @@ if ($script:ClaudeAvailable) {
     if ($LASTEXITCODE -ne 0) {
       throw "claude plugin install $MediaIoClaudePluginId failed."
     }
-    if (-not (Test-Path (Get-ClaudePluginCacheRoot))) {
-      throw "Claude Code plugin cache root was not created."
-    }
     $script:ResolvedClaudeMarketplaceName = "media-io"
     $script:ClaudePluginInstalled = $true
   } -SuccessMessage "Claude Code plugin install completed"
@@ -1298,7 +1335,8 @@ if ($script:ClaudeAvailable) {
 
     $cacheRoot = Get-ClaudePluginCacheRoot
     if (-not (Test-Path $cacheRoot)) {
-      throw "Claude Code plugin cache root is missing: $cacheRoot"
+      Add-Warning "Claude Code plugin cache root is missing: $cacheRoot. Treating this as non-blocking because Claude may already have been clean."
+      return
     }
 
     $raw = (& cmd /c "claude plugin list --json" | Out-String)
