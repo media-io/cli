@@ -122,6 +122,23 @@ function tryRun(command, args, options = {}) {
   };
 }
 
+// npm publish 后新版本在 registry 各边缘节点的可见时间不固定，紧跟着的 npm install
+// 偶尔会拿到还没同步的旧 packument 而报 ETARGET；这里按退避延迟重试同一条命令。
+async function runWithRetry(command, args, options, retryDelaysMs) {
+  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
+    if (attempt > 0) {
+      const delayMs = retryDelaysMs[attempt];
+      console.log(`[publish] ${command} ${args.join(" ")} 失败，${Math.round(delayMs / 1_000)} 秒后重试（${attempt}/${retryDelaysMs.length - 1}）`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    const result = tryRun(command, args, options);
+    if (result.stdout) process.stdout.write(`${result.stdout}\n`);
+    if (result.stderr) process.stderr.write(`${result.stderr}\n`);
+    if (result.ok) return result.stdout;
+    if (attempt === retryDelaysMs.length - 1) fail(`${command} 执行失败，退出码：${result.status}`);
+  }
+}
+
 function sha256(file) {
   return createHash("sha256").update(readFileSync(file)).digest("hex");
 }
@@ -574,7 +591,13 @@ async function publishNpm(releaseVersion, releaseDistTag, githubTag, apiBase, gi
 
     const smokeDirectory = mkdtempSync(join(tmpdir(), "mediaio-smoke-"));
     try {
-      run("npm", ["install", "--prefix", smokeDirectory, "--registry=https://registry.npmjs.org", `${packageName}@${releaseVersion}`], { env: npmEnv });
+      const npmRegistryPropagationDelaysMs = [0, 3_000, 5_000, 8_000, 10_000, 15_000, 15_000, 15_000, 15_000];
+      await runWithRetry(
+        "npm",
+        ["install", "--prefix", smokeDirectory, "--registry=https://registry.npmjs.org", `${packageName}@${releaseVersion}`],
+        { env: npmEnv },
+        npmRegistryPropagationDelaysMs,
+      );
       run(join(smokeDirectory, "node_modules", ".bin", "mediaio"), ["--help"], { env: npmEnv });
       run(join(smokeDirectory, "node_modules", ".bin", "mi"), ["--help"], { env: npmEnv });
     } finally {
