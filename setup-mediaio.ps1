@@ -1,5 +1,22 @@
+# Media.io setup script for Windows.
+# Installs the Media.io plugin, CLI, and skills in one pass.
+# CLI and skills prefer direct package/local installers and fall back to npm/npx only when needed.
+#
+# Usage (from an existing PowerShell session):
+#   irm https://raw.githubusercontent.com/<owner>/<repo>/main/setup-mediaio.ps1 | iex
+#
+# Environment variables (all optional):
+#   MEDIAIO_INSTALL_DIR      — where to put the CLI binary       (default: ~/.local/bin)
+#   MEDIAIO_VERSION          — version to install                (default: latest)
+#   MEDIAIO_NPM_PACKAGE      — npm package name for the CLI      (default: @mediaio/cli)
+#   MEDIAIO_NPM_REGISTRY     — npm registry URL                  (default: https://registry.npmjs.org)
+#   MEDIAIO_RELEASE_REPO     — GitHub repo for release assets    (default: media-io/cli)
+#   MEDIAIO_SKILL_REPO       — GitHub repo for skill source       (default: media-io/plugin)
+#   MEDIAIO_SKILL_SOURCE     — local or remote skill source path
+#
 [CmdletBinding()]
 param()
+
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
