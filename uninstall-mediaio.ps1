@@ -81,29 +81,6 @@ namespace User32 {
   [void][User32.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [IntPtr]::Zero, "Environment", $SMTO_ABORTIFHUNG, 5000, [ref]$result)
 }
 
-function Remove-DirectoryFromUserPath {
-  param([Parameter(Mandatory = $true)][string]$Directory)
-
-  $userPath = Get-UserEnvironmentPathValue
-  if ([string]::IsNullOrWhiteSpace($userPath)) { return $false }
-
-  $segments = @($userPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-  $filtered = @($segments | Where-Object { $_ -ne $Directory })
-  if ($filtered.Count -eq $segments.Count) { return $false }
-
-  $newValue = ($filtered -join ';')
-  Set-UserEnvironmentPathValue -Value $newValue
-
-  if ($env:Path) {
-    $envSegments = @($env:Path -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    $envFiltered = @($envSegments | Where-Object { $_ -ne $Directory })
-    $env:Path = ($envFiltered -join ';')
-  }
-
-  Broadcast-EnvironmentChange
-  return $true
-}
-
 function Test-CommandAvailable {
   param([Parameter(Mandatory = $true)][string]$Name)
   return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
@@ -204,6 +181,19 @@ function Remove-PathIfPresent {
   return $false
 }
 
+function Remove-EmptyDirectoryIfPresent {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  if (-not (Test-Path $Path)) { return $false }
+
+  $children = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)
+  if ($children.Count -gt 0) { return $false }
+
+  Remove-Item -LiteralPath $Path -Force
+  Write-Host "  OK: removed empty directory $Path" -ForegroundColor Green
+  return $true
+}
+
 function Get-PersonalMarketplacePath {
   return Join-Path $env:USERPROFILE ".agents\plugins\marketplace.json"
 }
@@ -289,6 +279,13 @@ function Get-CodexPluginCacheRoots {
   })
 }
 
+function Get-CodexPluginCacheNamespaceRoots {
+  $cacheRoot = Join-Path $env:USERPROFILE ".codex\plugins\cache"
+  return @(
+    (Join-Path $cacheRoot "media-io")
+  )
+}
+
 function Get-CodexMarketplaceRoots {
   $roots = New-Object System.Collections.Generic.List[string]
   $tmpMarketplaceRoot = Join-Path $env:USERPROFILE ".codex\.tmp\marketplaces"
@@ -320,9 +317,20 @@ function Get-ClaudePluginCacheRoots {
   })
 }
 
+function Get-ClaudePluginCacheNamespaceRoots {
+  $cacheRoot = Join-Path $env:USERPROFILE ".claude\plugins\cache"
+  return @(
+    (Join-Path $cacheRoot "media-io")
+  )
+}
+
 function Remove-CodexPluginCaches {
   foreach ($cacheRoot in Get-CodexPluginCacheRoots) {
     [void](Remove-PathIfPresent -Path $cacheRoot)
+  }
+
+  foreach ($namespaceRoot in Get-CodexPluginCacheNamespaceRoots) {
+    [void](Remove-EmptyDirectoryIfPresent -Path $namespaceRoot)
   }
 }
 
@@ -359,11 +367,18 @@ function Remove-ClaudePluginCaches {
   foreach ($cacheRoot in Get-ClaudePluginCacheRoots) {
     [void](Remove-PathIfPresent -Path $cacheRoot)
   }
+
+  foreach ($namespaceRoot in Get-ClaudePluginCacheNamespaceRoots) {
+    [void](Remove-EmptyDirectoryIfPresent -Path $namespaceRoot)
+  }
 }
 
 function Test-CodexPluginCachePresent {
   foreach ($cacheRoot in Get-CodexPluginCacheRoots) {
     if (Test-Path $cacheRoot) { return $true }
+  }
+  foreach ($namespaceRoot in Get-CodexPluginCacheNamespaceRoots) {
+    if (Test-Path $namespaceRoot) { return $true }
   }
   return $false
 }
@@ -378,6 +393,9 @@ function Test-CodexMarketplacePresent {
 function Test-ClaudePluginCachePresent {
   foreach ($cacheRoot in Get-ClaudePluginCacheRoots) {
     if (Test-Path $cacheRoot) { return $true }
+  }
+  foreach ($namespaceRoot in Get-ClaudePluginCacheNamespaceRoots) {
+    if (Test-Path $namespaceRoot) { return $true }
   }
   return $false
 }
@@ -399,11 +417,6 @@ function Remove-MediaIoCli {
 
   $releaseExe = Join-Path $MediaIoInstallDir "mediaio.exe"
   if (Remove-PathIfPresent -Path $releaseExe) {
-    $removedSomething = $true
-  }
-
-  if (Remove-DirectoryFromUserPath -Directory $MediaIoInstallDir) {
-    Write-Host "  OK: removed $MediaIoInstallDir from user PATH" -ForegroundColor Green
     $removedSomething = $true
   }
 
