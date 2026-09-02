@@ -980,18 +980,30 @@ function Remove-DirectMediaIoSkillsIfPresent {
   }
 }
 
+function Get-MediaIoPluginManifestCandidates {
+  $manifests = New-Object System.Collections.Generic.List[string]
+  foreach ($root in (Get-MediaIoPluginSourceCandidates)) {
+    $manifests.Add((Join-Path $root ".claude-plugin\plugin.json"))
+    $manifests.Add((Join-Path $root ".codex-plugin\plugin.json"))
+    $manifests.Add((Join-Path $root "plugin.json"))
+  }
+
+  $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  return @($manifests | Where-Object {
+    -not [string]::IsNullOrWhiteSpace($_) -and $seen.Add([System.IO.Path]::GetFullPath($_))
+  })
+}
+
 function Get-MediaIoPluginVersion {
-  $manifestPath = Join-Path $PSScriptRoot ".claude-plugin\plugin.json"
-  if (-not (Test-Path $manifestPath)) {
-    throw "Media.io plugin manifest not found at $manifestPath."
+  foreach ($manifestPath in (Get-MediaIoPluginManifestCandidates)) {
+    if (-not (Test-Path $manifestPath)) { continue }
+    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+    if (-not [string]::IsNullOrWhiteSpace([string]$manifest.version)) {
+      return [string]$manifest.version
+    }
   }
 
-  $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-  if ([string]::IsNullOrWhiteSpace([string]$manifest.version)) {
-    throw "Media.io plugin manifest does not declare a version."
-  }
-
-  return [string]$manifest.version
+  throw "Media.io plugin manifest does not declare a version."
 }
 
 function Get-CodexMarketplaceCheckoutRoot {
