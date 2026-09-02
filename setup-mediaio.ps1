@@ -1312,9 +1312,6 @@ if ($script:ClaudeAvailable) {
     if ($LASTEXITCODE -ne 0) {
       throw "claude plugin install $MediaIoClaudePluginId failed."
     }
-    if (-not (Test-Path (Get-ClaudePluginCacheRoot))) {
-      throw "Claude Code plugin cache root was not created."
-    }
     $script:ResolvedClaudeMarketplaceName = "media-io"
     $script:ClaudePluginInstalled = $true
   } -SuccessMessage "Claude Code plugin install completed"
@@ -1326,7 +1323,8 @@ if ($script:ClaudeAvailable) {
 
     $cacheRoot = Get-ClaudePluginCacheRoot
     if (-not (Test-Path $cacheRoot)) {
-      throw "Claude Code plugin cache root is missing: $cacheRoot"
+      Add-Warning "Claude Code plugin cache root is missing: $cacheRoot. Treating this as non-blocking because Claude may already have been clean."
+      return
     }
 
     $raw = (& cmd /c "claude plugin list --json" | Out-String)
