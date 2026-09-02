@@ -7,7 +7,7 @@ current operating system and CPU architecture, then invokes it through a
 JavaScript launcher that forwards arguments, stdio, signals, and exit codes.
 
 For the broader technical design, see
-[MCP, CLI, and Agent Plugin Technical Plan v2](../media-plugin-mcp/docs/architecture/MCP、CLI与Agent插件技术方案-v2.md).
+[MCP, CLI, and Agent Plugin Technical Plan v3](../media-plugin-api/docs/architecture/MCP、CLI与Agent插件技术方案-v3.md).
 
 ## Architecture
 
