@@ -86,6 +86,15 @@ function assertReleaseSelection(baseVersion, releaseVersion, releaseDistTag, wit
   }
 }
 
+// GitHub Release 页面的“Release label”只有 None/Pre-release/Latest 三态，由 RELEASE_DIST_TAG 派生：
+// latest -> Latest，next -> Pre-release；assertReleaseSelection 目前只放行这两个取值，
+// 未识别的取值一律回退为 None，不允许静默变成 Latest。
+function releaseLabelFor(releaseDistTag) {
+  if (releaseDistTag === "latest") return { prerelease: false, makeLatest: "true" };
+  if (releaseDistTag === "next") return { prerelease: true, makeLatest: "false" };
+  return { prerelease: false, makeLatest: "false" };
+}
+
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd ?? packageRoot,
@@ -399,9 +408,10 @@ async function releaseFromState(apiBase, githubToken, state, options = {}) {
   fail(`等待 GitHub Draft Release 可查询超时：${state.github_tag}`);
 }
 
-async function ensureDraftRelease(apiBase, githubTag, cliCommit, releaseVersion, githubToken) {
+async function ensureDraftRelease(apiBase, githubTag, cliCommit, releaseDistTag, githubToken) {
   let release = await releaseForTag(apiBase, githubTag, githubToken);
   if (!release) {
+    const { prerelease, makeLatest } = releaseLabelFor(releaseDistTag);
     release = await githubRequest(`${apiBase}/releases`, githubToken, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -410,7 +420,8 @@ async function ensureDraftRelease(apiBase, githubTag, cliCommit, releaseVersion,
         target_commitish: cliCommit,
         name: githubTag,
         draft: true,
-        prerelease: releaseVersion.includes("-"),
+        prerelease,
+        make_latest: makeLatest,
         generate_release_notes: false,
       }),
     });
@@ -490,22 +501,29 @@ async function uploadBinaryAssets(release, apiBase, githubRepository, githubToke
   return refreshedRelease;
 }
 
-async function publishGithubRelease(release, apiBase, githubToken, archiveNames) {
+async function publishGithubRelease(release, apiBase, githubToken, archiveNames, releaseDistTag) {
   const uploadedNames = new Set(release.assets.map((asset) => asset.name));
   for (const name of releaseAssetNames(archiveNames)) {
     if (!uploadedNames.has(name)) fail(`GitHub Release 缺少资产：${name}`);
   }
+  const { prerelease, makeLatest } = releaseLabelFor(releaseDistTag);
   if (!release.draft) {
+    // Draft 期间 make_latest 会被 GitHub 忽略，公开后的 prerelease 才是最终真值；
+    // 已公开的重试如果标签和本次 RELEASE_DIST_TAG 对不上，说明发布渠道选错了，不能静默放行。
+    if (release.prerelease !== prerelease) {
+      fail(`GitHub Release ${release.tag_name} 已公开，但 prerelease=${release.prerelease} 与 RELEASE_DIST_TAG=${releaseDistTag} 期望值不一致`);
+    }
     console.log(`[publish] GitHub Release already public: ${release.tag_name}`);
     return release;
   }
   const publicRelease = await githubRequest(`${apiBase}/releases/${release.id}`, githubToken, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ draft: false }),
+    body: JSON.stringify({ draft: false, prerelease, make_latest: makeLatest }),
   });
   if (publicRelease.draft) fail("GitHub Release 未成功公开");
-  console.log(`[publish] GitHub Release published: ${publicRelease.tag_name}`);
+  if (publicRelease.prerelease !== prerelease) fail(`GitHub Release 公开后 prerelease 状态与 RELEASE_DIST_TAG=${releaseDistTag} 不一致`);
+  console.log(`[publish] GitHub Release published: ${publicRelease.tag_name} (dist-tag=${releaseDistTag})`);
   return publicRelease;
 }
 
@@ -633,7 +651,7 @@ try {
       ? await releaseFromState(apiBase, githubToken, storedState, { allowMissing: true, retry: false })
       : null;
     if (!release) {
-      release = await ensureDraftRelease(apiBase, githubTag, source.cliCommit, releaseVersion, githubToken);
+      release = await ensureDraftRelease(apiBase, githubTag, source.cliCommit, releaseDistTag, githubToken);
     }
     if (!release.draft) fail(`GitHub Release ${githubTag} 已公开；不能创建或改写 Draft Release`);
     writeGithubReleaseState(release, githubRepository, githubTag, releaseVersion, source.cliCommit);
@@ -648,7 +666,7 @@ try {
     const githubToken = requiredEnv("GITHUB_TOKEN");
     const state = readGithubReleaseState(githubRepository, githubTag, releaseVersion, source.cliCommit);
     const release = await releaseFromState(apiBase, githubToken, state);
-    await publishGithubRelease(release, apiBase, githubToken, binaryArchiveNames(releaseVersion));
+    await publishGithubRelease(release, apiBase, githubToken, binaryArchiveNames(releaseVersion), releaseDistTag);
   } else if (operation === "publish-npm") {
     const githubToken = requiredEnv("GITHUB_TOKEN");
     await publishNpm(releaseVersion, releaseDistTag, githubTag, apiBase, githubToken);
@@ -658,10 +676,10 @@ try {
     const gitAuth = configureGithubRemote(githubToken, githubRepository);
     syncSource(gitAuth, source.cliCommit, githubBranch);
     ensureGithubTag(gitAuth, githubTag, source.cliCommit);
-    let release = await ensureDraftRelease(apiBase, githubTag, source.cliCommit, releaseVersion, githubToken);
+    let release = await ensureDraftRelease(apiBase, githubTag, source.cliCommit, releaseDistTag, githubToken);
     const manifestPath = createReleaseManifest(baseVersion, releaseVersion, releaseDistTag, withCiSuffix, githubTag, source.cliCommit, artifacts);
     release = await uploadBinaryAssets(release, apiBase, githubRepository, githubToken, artifacts, manifestPath);
-    await publishGithubRelease(release, apiBase, githubToken, artifacts.archiveNames);
+    await publishGithubRelease(release, apiBase, githubToken, artifacts.archiveNames, releaseDistTag);
     await publishNpm(releaseVersion, releaseDistTag, githubTag, apiBase, githubToken);
   }
 } finally {
