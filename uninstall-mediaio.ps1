@@ -33,6 +33,77 @@ function Add-Warning {
   Write-Host "  WARN: $Message" -ForegroundColor Yellow
 }
 
+function Get-UserEnvironmentPathValue {
+  $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $false)
+  if ($null -eq $key) { return "" }
+  try {
+    $value = $key.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    return [string]$value
+  } finally {
+    $key.Close()
+  }
+}
+
+function Set-UserEnvironmentPathValue {
+  param([Parameter(Mandatory = $true)][string]$Value)
+
+  $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("Environment")
+  if ($null -eq $key) {
+    throw "Could not open HKCU\Environment for writing."
+  }
+
+  try {
+    $key.SetValue("Path", $Value, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+  } finally {
+    $key.Close()
+  }
+}
+
+function Broadcast-EnvironmentChange {
+  if (-not ("User32.NativeMethods" -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+namespace User32 {
+  public static class NativeMethods {
+    [DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern IntPtr SendMessageTimeout(IntPtr hWnd, int Msg, IntPtr wParam, string lParam, int flags, int timeout, out IntPtr result);
+  }
+}
+"@
+  }
+
+  $HWND_BROADCAST = [IntPtr]0xffff
+  $WM_SETTINGCHANGE = 0x001A
+  $SMTO_ABORTIFHUNG = 0x0002
+  $result = [IntPtr]::Zero
+  [void][User32.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [IntPtr]::Zero, "Environment", $SMTO_ABORTIFHUNG, 5000, [ref]$result)
+}
+
+function Remove-DirectoryFromUserPath {
+  param([Parameter(Mandatory = $true)][string]$Directory)
+
+  $userPath = Get-UserEnvironmentPathValue
+  if ([string]::IsNullOrWhiteSpace($userPath)) { return $false }
+
+  $segments = @($userPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  $filtered = @($segments | Where-Object { $_ -ne $Directory })
+  if ($filtered.Count -eq $segments.Count) { return $false }
+
+  $newValue = ($filtered -join ';')
+  Set-UserEnvironmentPathValue -Value $newValue
+
+  if ($env:Path) {
+    $envSegments = @($env:Path -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $envFiltered = @($envSegments | Where-Object { $_ -ne $Directory })
+    $env:Path = ($envFiltered -join ';')
+  }
+
+  Broadcast-EnvironmentChange
+  return $true
+}
+
 function Test-CommandAvailable {
   param([Parameter(Mandatory = $true)][string]$Name)
   return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
@@ -328,6 +399,11 @@ function Remove-MediaIoCli {
 
   $releaseExe = Join-Path $MediaIoInstallDir "mediaio.exe"
   if (Remove-PathIfPresent -Path $releaseExe) {
+    $removedSomething = $true
+  }
+
+  if (Remove-DirectoryFromUserPath -Directory $MediaIoInstallDir) {
+    Write-Host "  OK: removed $MediaIoInstallDir from user PATH" -ForegroundColor Green
     $removedSomething = $true
   }
 
