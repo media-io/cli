@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# uninstall-mediaio.sh script version: 0.1.0
 set -euo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -6,6 +7,7 @@ SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 step_index=0
 failures=()
 warnings=()
+SCRIPT_VERSION="0.1.0"
 MediaIoInstallDir="${MEDIAIO_INSTALL_DIR:-$HOME/.local/bin}"
 MediaIoCodexMarketplaceName="${MEDIAIO_CODEX_MARKETPLACE_NAME:-media-io}"
 claude_available=0
@@ -93,6 +95,45 @@ get_mediaio_plugin_source_candidates() {
 
 get_mediaio_plugin_source_root() {
   get_mediaio_plugin_source_candidates
+}
+
+get_mediaio_skill_source_candidates() {
+  local candidates=()
+  if [[ -n "${MEDIAIO_SKILL_SOURCE:-}" ]]; then
+    candidates+=("$MEDIAIO_SKILL_SOURCE")
+  fi
+  candidates+=(
+    "$SCRIPT_ROOT"
+    "$SCRIPT_ROOT/../media-plugin-main"
+    "$SCRIPT_ROOT/../plugins/media-io"
+  )
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -d "$candidate/skills" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+get_mediaio_skill_source_root() {
+  get_mediaio_skill_source_candidates
+}
+
+get_mediaio_skill_names() {
+  local source_root skill_dir
+  source_root="$(get_mediaio_skill_source_root)"
+  [[ -d "$source_root/skills" ]] || return 1
+
+  while IFS= read -r skill_dir; do
+    [[ -n "$skill_dir" ]] || continue
+    if [[ -f "$skill_dir/SKILL.md" ]]; then
+      basename "$skill_dir"
+    fi
+  done < <(find "$source_root/skills" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
 }
 
 get_mediaio_plugin_version() {
@@ -214,6 +255,22 @@ get_codex_plugin_cache_roots() {
   fi
 }
 
+get_codex_marketplace_roots() {
+  local roots=()
+  local tmp_marketplace_root="$HOME/.codex/.tmp/marketplaces"
+  local marketplace
+
+  for marketplace in "$MediaIoCodexMarketplaceName" media-io; do
+    [[ -n "$marketplace" ]] || continue
+    roots+=("$tmp_marketplace_root/$marketplace")
+  done
+
+  local root
+  for root in "${roots[@]}"; do
+    printf '%s\n' "$root"
+  done
+}
+
 get_claude_plugin_cache_roots() {
   local version cache_root
   version="$(get_mediaio_plugin_version)"
@@ -240,6 +297,14 @@ remove_codex_plugin_caches() {
   done < <(get_codex_plugin_cache_roots)
 }
 
+remove_codex_marketplaces() {
+  local marketplace_root
+  while IFS= read -r marketplace_root; do
+    [[ -n "$marketplace_root" ]] || continue
+    remove_path_if_present "$marketplace_root" >/dev/null || true
+  done < <(get_codex_marketplace_roots)
+}
+
 remove_claude_plugin_caches() {
   local cache_root
   while IFS= read -r cache_root; do
@@ -250,37 +315,37 @@ remove_claude_plugin_caches() {
 
 remove_skill_directories() {
   local skill_root
-  for skill_root in \
-    "$HOME/.agents/skills/mediaio-generate" \
-    "$HOME/.agents/skills/mediaio-install" \
-    "$HOME/.claude/skills/mediaio-generate" \
-    "$HOME/.claude/skills/mediaio-install" \
-    "$HOME/.codex/skills/mediaio-generate" \
-    "$HOME/.codex/skills/mediaio-install"
-  do
-    if [[ -d "$skill_root" ]]; then
-      rm -rf "$skill_root"
-      printf '  OK: removed skill directory %s\n' "$skill_root"
-    fi
-  done
+  local base skill_name skill_count=0
+  while IFS= read -r skill_name; do
+    [[ -n "$skill_name" ]] || continue
+    skill_count=$((skill_count + 1))
+    for base in "$HOME/.agents/skills" "$HOME/.claude/skills" "$HOME/.codex/skills"; do
+      skill_root="$base/$skill_name"
+      if [[ -d "$skill_root" ]]; then
+        rm -rf "$skill_root"
+        printf '  OK: removed skill directory %s\n' "$skill_root"
+      fi
+    done
+  done < <(get_mediaio_skill_names)
+
+  [[ $skill_count -gt 0 ]]
 }
 
 test_skill_directories_absent() {
   local skill_root
-  for skill_root in \
-    "$HOME/.agents/skills/mediaio-generate" \
-    "$HOME/.agents/skills/mediaio-install" \
-    "$HOME/.claude/skills/mediaio-generate" \
-    "$HOME/.claude/skills/mediaio-install" \
-    "$HOME/.codex/skills/mediaio-generate" \
-    "$HOME/.codex/skills/mediaio-install"
-  do
-    if [[ -d "$skill_root" ]]; then
-      return 1
-    fi
-  done
+  local base skill_name skill_count=0
+  while IFS= read -r skill_name; do
+    [[ -n "$skill_name" ]] || continue
+    skill_count=$((skill_count + 1))
+    for base in "$HOME/.agents/skills" "$HOME/.claude/skills" "$HOME/.codex/skills"; do
+      skill_root="$base/$skill_name"
+      if [[ -d "$skill_root" ]]; then
+        return 1
+      fi
+    done
+  done < <(get_mediaio_skill_names)
 
-  return 0
+  [[ $skill_count -gt 0 ]]
 }
 
 test_codex_plugin_cache_present() {
@@ -412,6 +477,7 @@ remove_codex_plugin() {
   fi
 
   remove_codex_plugin_caches
+  remove_codex_marketplaces
 
   if [[ $removed -eq 0 ]]; then
     return 0
@@ -422,6 +488,13 @@ verify_codex_plugin_removed() {
   if test_codex_plugin_cache_present; then
     return 1
   fi
+  local marketplace_root
+  while IFS= read -r marketplace_root; do
+    [[ -n "$marketplace_root" ]] || continue
+    if [[ -e "$marketplace_root" ]]; then
+      return 1
+    fi
+  done < <(get_codex_marketplace_roots)
 
   local marketplace_path
   marketplace_path="$(get_personal_marketplace_path)"
@@ -450,6 +523,13 @@ verify_final_state() {
   if test_codex_plugin_cache_present; then
     add_failure "Final verification - Media.io Codex plugin cache is still present."
   fi
+  while IFS= read -r marketplace_root; do
+    [[ -n "$marketplace_root" ]] || continue
+    if [[ -e "$marketplace_root" ]]; then
+      add_failure "Final verification - Media.io Codex marketplace snapshot is still present."
+      break
+    fi
+  done < <(get_codex_marketplace_roots)
 
   if test_claude_plugin_cache_present; then
     add_failure "Final verification - Media.io Claude Code plugin cache is still present."
@@ -474,6 +554,7 @@ verify_final_state() {
 }
 
 printf '%s\n' "Media.io uninstall script"
+printf 'Script version: %s\n' "$SCRIPT_VERSION"
 printf '%s\n' "This script removes the Media.io CLI, Claude/Codex plugin state, and Media.io skills with checks after each step."
 
 check_optional_host "Preflight: locate claude" claude claude_available
