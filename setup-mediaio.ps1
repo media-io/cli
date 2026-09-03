@@ -1,5 +1,5 @@
 # Media.io setup script for Windows.
-# setup-mediaio.ps1 script version: 0.1.1
+# setup-mediaio.ps1 script version: 0.1.2
 # Installs the Media.io plugin, CLI, and skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
@@ -25,7 +25,7 @@ $ErrorActionPreference = "Stop"
 $script:StepIndex = 0
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
-$script:ScriptVersion = "0.1.1"
+$script:ScriptVersion = "0.1.2"
 $script:ResolvedClaudeMarketplaceName = $null
 $script:UseCodexPersonalMarketplaceFallback = $false
 $script:CodexPersonalMarketplaceFallbackReason = $null
@@ -763,11 +763,15 @@ function Get-LocalMediaIoSkillDirs {
   return @()
 }
 
+function Get-DefaultMediaIoSkillNames {
+  return @("mediaio-generate", "mediaio-install")
+}
+
 function Get-MediaIoSkillNames {
   $names = @(Get-LocalMediaIoSkillDirs | ForEach-Object { $_.Name })
   if ($names.Count -gt 0) { return $names }
 
-  return @("mediaio-generate", "mediaio-install")
+  return @(Get-DefaultMediaIoSkillNames)
 }
 
 function Get-MediaIoSkillTargetBases {
@@ -924,15 +928,17 @@ function Get-CodexMarketplaceCheckoutRoot {
 }
 
 function Get-CodexMediaIoPluginVersion {
-  $candidateManifests = @(
-    (Join-Path (Get-CodexMarketplaceCheckoutRoot) ".codex-plugin\plugin.json"),
-    (Join-Path $PSScriptRoot ".codex-plugin\plugin.json"),
-    (Join-Path $PSScriptRoot ".claude-plugin\plugin.json"),
-    (Join-Path (Get-LocalMediaIoPluginRoot) ".codex-plugin\plugin.json"),
-    (Join-Path (Get-LocalMediaIoPluginRoot) "plugin.json")
-  )
+  $candidateManifests = New-Object System.Collections.Generic.List[string]
+  $candidateManifests.Add((Join-Path (Get-CodexMarketplaceCheckoutRoot) ".codex-plugin\plugin.json"))
+  if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+    $candidateManifests.Add((Join-Path $PSScriptRoot ".codex-plugin\plugin.json"))
+    $candidateManifests.Add((Join-Path $PSScriptRoot ".claude-plugin\plugin.json"))
+  }
+  $candidateManifests.Add((Join-Path (Get-LocalMediaIoPluginRoot) ".codex-plugin\plugin.json"))
+  $candidateManifests.Add((Join-Path (Get-LocalMediaIoPluginRoot) "plugin.json"))
 
   foreach ($manifestPath in $candidateManifests) {
+    if ([string]::IsNullOrWhiteSpace($manifestPath)) { continue }
     if (-not (Test-Path $manifestPath)) { continue }
     $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
     if (-not [string]::IsNullOrWhiteSpace([string]$manifest.version)) {

@@ -1,5 +1,5 @@
 [CmdletBinding()]
-# uninstall-mediaio.ps1 script version: 0.1.1
+# uninstall-mediaio.ps1 script version: 0.1.2
 param()
 
 Set-StrictMode -Version Latest
@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 $script:StepIndex = 0
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
-$script:ScriptVersion = "0.1.1"
+$script:ScriptVersion = "0.1.2"
 
 $MediaIoPackageName = if ($env:MEDIAIO_NPM_PACKAGE) { $env:MEDIAIO_NPM_PACKAGE } else { "@mediaio/cli" }
 $MediaIoInstallDir = if ($env:MEDIAIO_INSTALL_DIR) { $env:MEDIAIO_INSTALL_DIR } else { Join-Path $HOME ".local\bin" }
@@ -495,10 +495,18 @@ function Get-MediaIoSkillRoots {
   return @($roots | Select-Object -Unique)
 }
 
+function Get-DefaultMediaIoSkillNames {
+  return @("mediaio-generate", "mediaio-install")
+}
+
 function Get-MediaIoSkillNames {
+  if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+    return @(Get-DefaultMediaIoSkillNames)
+  }
+
   $skillSource = Join-Path $PSScriptRoot "skills"
   if (-not (Test-Path $skillSource)) {
-    return @("mediaio-generate", "mediaio-install")
+    return @(Get-DefaultMediaIoSkillNames)
   }
 
   $names = @(
@@ -508,7 +516,7 @@ function Get-MediaIoSkillNames {
   )
   if ($names.Count -gt 0) { return $names }
 
-  return @("mediaio-generate", "mediaio-install")
+  return @(Get-DefaultMediaIoSkillNames)
 }
 
 function Remove-SkillDirectories {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-mediaio.sh script version: 0.1.1
+# setup-mediaio.sh script version: 0.1.2
 set -euo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,7 +7,7 @@ SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 step_index=0
 failures=()
 warnings=()
-SCRIPT_VERSION="0.1.1"
+SCRIPT_VERSION="0.1.2"
 MediaIoPackageName="${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}"
 MediaIoInstallDir="${MEDIAIO_INSTALL_DIR:-$HOME/.local/bin}"
 MediaIoNpmRegistry="${MEDIAIO_NPM_REGISTRY:-https://registry.npmjs.org}"
@@ -545,7 +545,9 @@ get_mediaio_skill_source_candidates() {
 
   local candidate
   for candidate in "${candidates[@]}"; do
-    if [[ -f "$candidate/skills/mediaio-generate/SKILL.md" ]] && [[ -f "$candidate/skills/mediaio-install/SKILL.md" ]]; then
+    if get_default_mediaio_skill_names | while IFS= read -r skill_name; do
+      [[ -f "$candidate/skills/$skill_name/SKILL.md" ]] || exit 1
+    done; then
       printf '%s\n' "$candidate"
       return 0
     fi
@@ -558,10 +560,14 @@ get_mediaio_skill_source_root() {
   get_mediaio_skill_source_candidates
 }
 
+get_default_mediaio_skill_names() {
+  printf '%s\n' mediaio-generate mediaio-install
+}
+
 get_mediaio_skill_names() {
   local source_root skill_dir found=0
   if ! source_root="$(get_mediaio_skill_source_root)" || ! [[ -d "$source_root/skills" ]]; then
-    printf '%s\n' mediaio-generate mediaio-install
+    get_default_mediaio_skill_names
     return 0
   fi
 
@@ -574,7 +580,7 @@ get_mediaio_skill_names() {
   done < <(find "$source_root/skills" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
 
   if [[ "$found" -eq 0 ]]; then
-    printf '%s\n' mediaio-generate mediaio-install
+    get_default_mediaio_skill_names
   fi
 }
 
