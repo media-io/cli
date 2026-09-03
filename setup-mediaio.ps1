@@ -1,7 +1,7 @@
 # Media.io setup script for Windows.
-# setup-mediaio.ps1 script version: 0.1.0
+# setup-mediaio.ps1 script version: 0.1.1
 # Installs the Media.io plugin, CLI, and skills in one pass.
-# CLI prefers npm and falls back to a release archive; skills prefer local installers and fall back to npm/npx only when needed.
+# CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
 # Usage (from an existing PowerShell session):
 #   irm https://raw.githubusercontent.com/<owner>/<repo>/main/setup-mediaio.ps1 | iex
@@ -25,9 +25,11 @@ $ErrorActionPreference = "Stop"
 $script:StepIndex = 0
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
-$script:ScriptVersion = "0.1.0"
+$script:ScriptVersion = "0.1.1"
 $script:ResolvedClaudeMarketplaceName = $null
 $script:UseCodexPersonalMarketplaceFallback = $false
+$script:CodexPersonalMarketplaceFallbackReason = $null
+$script:CodexMarketplaceAddFailure = $null
 $script:ResolvedCodexMarketplaceName = $null
 $script:ResolvedMediaIoSkillSource = $null
 $script:ClaudeAvailable = $false
@@ -719,71 +721,6 @@ function Install-MediaIoCliFromRelease {
   }
 }
 
-function Copy-DirRecursive {
-  param(
-    [Parameter(Mandatory = $true)][string]$Source,
-    [Parameter(Mandatory = $true)][string]$Destination
-  )
-
-  if (!(Test-Path $Destination)) {
-    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-  }
-
-  $count = 0
-  Get-ChildItem -Path $Source -Force | ForEach-Object {
-    $destPath = Join-Path $Destination $_.Name
-    if ($_.PSIsContainer) {
-      $count += Copy-DirRecursive -Source $_.FullName -Destination $destPath
-    } else {
-      Copy-Item -Path $_.FullName -Destination $destPath -Force
-      $count++
-    }
-  }
-  return $count
-}
-
-function Backup-DirectoryIfPresent {
-  param([Parameter(Mandatory = $true)][string]$Path)
-  if (!(Test-Path $Path)) { return $null }
-
-  $backupRoot = Join-Path $HOME ".mediaio\skill-backups"
-  $stamp = [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss")
-  $targetRoot = Join-Path $backupRoot $stamp
-  $target = Join-Path $targetRoot (Split-Path $Path -Leaf)
-  $i = 1
-
-  while (Test-Path $target) {
-    $targetRoot = Join-Path $backupRoot "$stamp-$i"
-    $target = Join-Path $targetRoot (Split-Path $Path -Leaf)
-    $i++
-  }
-
-  New-Item -ItemType Directory -Path $targetRoot -Force | Out-Null
-  Move-Item -LiteralPath $Path -Destination $target -ErrorAction Stop
-  Write-Host "  Backed up existing skill: $Path -> $target" -ForegroundColor DarkGray
-  return [pscustomobject]@{ Original = $Path; Backup = $target }
-}
-
-function Restore-BackedUpDirectories {
-  param([array]$Backups)
-
-  $ok = $true
-  for ($i = $Backups.Count - 1; $i -ge 0; $i--) {
-    $item = $Backups[$i]
-    try {
-      if (Test-Path $item.Original) {
-        Remove-Item -LiteralPath $item.Original -Recurse -Force -ErrorAction Stop
-      }
-      Move-Item -LiteralPath $item.Backup -Destination $item.Original -ErrorAction Stop
-    } catch {
-      Add-Warning "Could not restore backed up skill $($item.Original); backup remains at $($item.Backup): $($_.Exception.Message)"
-      $ok = $false
-    }
-  }
-
-  return $ok
-}
-
 function Get-MediaIoSkillSourceCandidates {
   $candidates = New-Object System.Collections.Generic.List[string]
   if (-not [string]::IsNullOrWhiteSpace($MediaIoSkillSource)) {
@@ -827,74 +764,21 @@ function Get-LocalMediaIoSkillDirs {
 }
 
 function Get-MediaIoSkillNames {
-  @(Get-LocalMediaIoSkillDirs | ForEach-Object { $_.Name })
+  $names = @(Get-LocalMediaIoSkillDirs | ForEach-Object { $_.Name })
+  if ($names.Count -gt 0) { return $names }
+
+  return @("mediaio-generate", "mediaio-install")
 }
 
 function Get-MediaIoSkillTargetBases {
   $targets = @()
-  if ($script:CodexAvailable) {
+  if ($script:CodexAvailable -and -not $script:CodexPluginInstalled) {
     $targets += [pscustomobject]@{ Agent = "codex"; BaseDir = (Join-Path $HOME ".codex\skills") }
   }
-  if ($script:ClaudeAvailable) {
+  if ($script:ClaudeAvailable -and -not $script:ClaudePluginInstalled) {
     $targets += [pscustomobject]@{ Agent = "claude-code"; BaseDir = (Join-Path $HOME ".claude\skills") }
   }
   return @($targets)
-}
-
-function Install-MediaIoSkillsToBase {
-  param(
-    [Parameter(Mandatory = $true)][array]$SkillDirs,
-    [Parameter(Mandatory = $true)][string]$BaseDir,
-    [Parameter(Mandatory = $true)][string]$Agent
-  )
-
-  if (!(Test-Path $baseDir)) {
-    New-Item -ItemType Directory -Path $baseDir -Force | Out-Null
-  }
-
-  $stageRoot = Join-Path $baseDir (".mediaio-skills-set-" + [guid]::NewGuid().ToString("N"))
-  $backups = @()
-  $published = @()
-  try {
-    New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
-    foreach ($skillDir in $skillDirs) {
-      Copy-DirRecursive -Source $skillDir.FullName -Destination (Join-Path $stageRoot $skillDir.Name) | Out-Null
-    }
-
-    foreach ($skillDir in $skillDirs) {
-      $dest = Join-Path $baseDir $skillDir.Name
-      $backup = Backup-DirectoryIfPresent -Path $dest
-      if ($null -ne $backup) { $backups += $backup }
-      Move-Item -LiteralPath (Join-Path $stageRoot $skillDir.Name) -Destination $dest -ErrorAction Stop
-      $published += $dest
-      Write-Host "  Skills -> $dest ($Agent)" -ForegroundColor DarkGray
-    }
-  } catch {
-    foreach ($path in $published) {
-      Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    [void](Restore-BackedUpDirectories -Backups $backups)
-    throw
-  } finally {
-    Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
-  }
-}
-
-function Install-MediaIoSkillsFromLocalSource {
-  $skillDirs = @(Get-LocalMediaIoSkillDirs)
-  if ($skillDirs.Count -eq 0) {
-    throw "No local Media.io skill directories found in: $((Get-MediaIoSkillSourceCandidates) -join ', ')."
-  }
-  $targets = @(Get-MediaIoSkillTargetBases)
-  if ($targets.Count -eq 0) {
-    Add-Warning "Neither Codex nor Claude Code is available; skipping Media.io skills installation."
-    return
-  }
-  Write-Host "  Installing skills from $script:ResolvedMediaIoSkillSource" -ForegroundColor DarkGray
-
-  foreach ($target in $targets) {
-    Install-MediaIoSkillsToBase -SkillDirs $skillDirs -BaseDir $target.BaseDir -Agent $target.Agent
-  }
 }
 
 function Test-MediaIoSkillsInstalled {
@@ -939,12 +823,10 @@ function Get-MediaIoSkillAgentArgs {
 }
 
 function Invoke-MediaIoSkillInstall {
-  Invoke-OptionalFallbackStep "Install Media.io skills" {
-    Install-MediaIoSkillsFromLocalSource
-  } {
+  Invoke-CheckedStep "Install Media.io skills" {
     Ensure-NodeAndNpm
     $agentArgs = Get-MediaIoSkillAgentArgs
-    Write-Host "  Using npx fallback to install Media.io skills" -ForegroundColor DarkGray
+    Write-Host "  Installing Media.io skills with npx" -ForegroundColor DarkGray
     & cmd /c "npx --yes skills add $MediaIoSkillRepo -g $agentArgs --skill * -y"
   } {
     Test-MediaIoSkillsInstalled
@@ -1278,6 +1160,22 @@ function Initialize-PersonalMarketplaceFallback {
   return $marketplaceName
 }
 
+function Use-CodexPersonalMarketplaceFallback {
+  param([Parameter(Mandatory = $true)][string]$Reason)
+
+  if (-not $script:UseCodexPersonalMarketplaceFallback) {
+    Add-Warning "Using Codex personal marketplace fallback: $Reason"
+    $script:CodexPersonalMarketplaceFallbackReason = $Reason
+  } else {
+    Write-Host "  Codex personal marketplace fallback still active: $Reason" -ForegroundColor DarkGray
+    if ([string]::IsNullOrWhiteSpace([string]$script:CodexPersonalMarketplaceFallbackReason)) {
+      $script:CodexPersonalMarketplaceFallbackReason = $Reason
+    }
+  }
+
+  $script:UseCodexPersonalMarketplaceFallback = $true
+}
+
 function Get-CodexAvailablePluginIds {
   $raw = (& cmd /c "codex plugin list --json --available" | Out-String)
   if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
@@ -1316,7 +1214,7 @@ function Get-ClaudeMarketplaceIds {
 
 Write-Host "Media.io setup script" -ForegroundColor White
 Write-Host "Script version: $script:ScriptVersion" -ForegroundColor DarkGray
-Write-Host "This script installs the Media.io plugin, CLI, and skills. The CLI prefers npm and falls back to a release archive; skills prefer local installers and fall back to npm/npx only when needed." -ForegroundColor DarkGray
+Write-Host "This script installs the Media.io plugin, CLI, and skills. The CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable." -ForegroundColor DarkGray
 
 Invoke-OptionalHostDetection "Preflight: locate claude" "claude" {
   param([bool]$Available)
@@ -1393,16 +1291,27 @@ if ($script:ClaudeAvailable) {
 
 if ($script:CodexAvailable) {
   if (-not (Invoke-SoftStep "Add Media.io Codex marketplace" {
-    & cmd /c "codex plugin marketplace add $MediaIoMarketplaceSource"
+    $output = (& cmd /c "codex plugin marketplace add $MediaIoMarketplaceSource" 2>&1 | Out-String).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($output)) {
+      Write-Host $output
+    }
+    if ($LASTEXITCODE -ne 0) {
+      $script:CodexMarketplaceAddFailure = $output
+      throw "codex plugin marketplace add exited with code $LASTEXITCODE."
+    }
   } -SuccessMessage "Codex marketplace is registered")) {
-    $script:UseCodexPersonalMarketplaceFallback = $true
+    $reason = "Codex marketplace add failed for '$MediaIoMarketplaceSource'."
+    if (-not [string]::IsNullOrWhiteSpace([string]$script:CodexMarketplaceAddFailure)) {
+      $reason = "$reason $script:CodexMarketplaceAddFailure"
+    }
+    Use-CodexPersonalMarketplaceFallback $reason
   }
 
   if (-not $script:UseCodexPersonalMarketplaceFallback) {
     if (-not (Invoke-SoftStep "Refresh Media.io Codex marketplace" {
       & cmd /c "codex plugin marketplace upgrade $MediaIoCodexMarketplaceName"
     } -SuccessMessage "Codex marketplace is refreshed")) {
-      $script:UseCodexPersonalMarketplaceFallback = $true
+      Use-CodexPersonalMarketplaceFallback "Codex marketplace refresh failed for '$MediaIoCodexMarketplaceName'."
     }
   }
 
@@ -1422,7 +1331,7 @@ if ($script:CodexAvailable) {
         throw "Codex does not surface $expectedId from the git marketplace snapshot on this build."
       }
     } -SuccessMessage "Codex marketplace lookup finished")) {
-      $script:UseCodexPersonalMarketplaceFallback = $true
+      Use-CodexPersonalMarketplaceFallback "Codex marketplace visibility check failed for '$MediaIoCodexPluginName@$MediaIoCodexMarketplaceName'."
     }
   }
 
@@ -1432,8 +1341,7 @@ if ($script:CodexAvailable) {
     if (-not $script:UseCodexPersonalMarketplaceFallback) {
       & cmd /c "codex plugin add $MediaIoCodexPluginName@$MediaIoCodexMarketplaceName"
       if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Get-CodexPluginCacheRoot -MarketplaceName $MediaIoCodexMarketplaceName))) {
-        Add-Warning "The Codex git marketplace install did not leave an installable cache root. Switching to the personal marketplace fallback."
-        $script:UseCodexPersonalMarketplaceFallback = $true
+        Use-CodexPersonalMarketplaceFallback "Codex git marketplace install did not leave an installable cache root for '$MediaIoCodexPluginName@$MediaIoCodexMarketplaceName'."
       } else {
         $script:ResolvedCodexMarketplaceName = $MediaIoCodexMarketplaceName
         $script:CodexPluginInstalled = $true
@@ -1442,6 +1350,11 @@ if ($script:CodexAvailable) {
 
     if ($script:UseCodexPersonalMarketplaceFallback) {
       $installedMarketplaceName = Initialize-PersonalMarketplaceFallback
+      if (-not [string]::IsNullOrWhiteSpace([string]$script:CodexPersonalMarketplaceFallbackReason)) {
+        Write-Host "  Codex personal marketplace fallback reason: $script:CodexPersonalMarketplaceFallbackReason" -ForegroundColor Yellow
+      }
+      Write-Host "  Installing through Codex personal marketplace fallback: $MediaIoCodexPluginName@$installedMarketplaceName" -ForegroundColor Yellow
+      Write-Host "  Personal marketplace file: $(Get-PersonalMarketplacePath)" -ForegroundColor DarkGray
       & cmd /c "codex plugin add $MediaIoCodexPluginName@$installedMarketplaceName"
       if ($LASTEXITCODE -ne 0) {
         throw "codex plugin add $MediaIoCodexPluginName@$installedMarketplaceName failed."
@@ -1481,7 +1394,7 @@ if ($script:CodexAvailable) {
   } -SuccessMessage "Codex plugin cache is present"
 }
 
-$skipDirectSkillsInstall = ($script:ClaudePluginReady -or $script:CodexPluginReady)
+$skipDirectSkillsInstall = (@(Get-MediaIoSkillTargetBases).Count -eq 0)
 if ($skipDirectSkillsInstall) {
   Write-Step "Skip direct Media.io skills install"
   Write-Host "  OK: plugin-provided skills are installed; direct skills install is skipped to avoid duplicate entries" -ForegroundColor Green
