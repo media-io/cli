@@ -546,6 +546,8 @@ verify_claude_plugin_removed() {
 }
 
 verify_final_state() {
+  failures_before=$failure_count
+
   if verify_mediaio_package_removed; then
     printf '  OK: @mediaio/cli is absent from the npm global root\n'
   else
@@ -569,16 +571,34 @@ verify_final_state() {
   test_skill_directories_absent || add_failure "Final verification - some Media.io skill directories are still present."
 
   marketplace_path=$(get_personal_marketplace_path)
-  if [ -f "$marketplace_path" ]; then
+  if [ ! -f "$marketplace_path" ]; then
+    :
+  elif ! require_command node; then
+    add_warning "node is not available; the personal marketplace file was not checked for a leftover media-io entry."
+  else
+    entry_status=0
     node -e '
       const fs = require("fs");
       const path = process.argv[1];
-      const payload = JSON.parse(fs.readFileSync(path, "utf8"));
+      let payload;
+      try {
+        payload = JSON.parse(fs.readFileSync(path, "utf8"));
+      } catch (error) {
+        process.exit(2);
+      }
       const names = Array.isArray(payload.plugins) ? payload.plugins.map((entry) => entry && entry.name) : [];
       if (names.includes("media-io")) process.exit(1);
-    ' "$marketplace_path" || add_failure "Final verification - media-io remains in the personal marketplace file."
+    ' "$marketplace_path" || entry_status=$?
+    case "$entry_status" in
+      0) ;;
+      2) add_warning "Personal marketplace file exists but could not be parsed cleanly; treating the media-io entry as absent." ;;
+      *) add_failure "Final verification - media-io remains in the personal marketplace file." ;;
+    esac
   fi
-  printf '  OK: requested Media.io uninstall targets are absent\n'
+
+  if [ "$failure_count" -eq "$failures_before" ]; then
+    printf '  OK: requested Media.io uninstall targets are absent\n'
+  fi
 }
 
 print_list() {
