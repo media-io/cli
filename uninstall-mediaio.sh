@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# uninstall-mediaio.sh script version: 0.1.2
+# uninstall-mediaio.sh script version: 0.1.4
 set -euo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,7 +7,7 @@ SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 step_index=0
 failures=()
 warnings=()
-SCRIPT_VERSION="0.1.2"
+SCRIPT_VERSION="0.1.4"
 MediaIoInstallDir="${MEDIAIO_INSTALL_DIR:-$HOME/.local/bin}"
 MediaIoCodexMarketplaceName="${MEDIAIO_CODEX_MARKETPLACE_NAME:-media-io}"
 claude_available=0
