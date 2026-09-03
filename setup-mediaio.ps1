@@ -1,5 +1,5 @@
 # Media.io setup script for Windows.
-# setup-mediaio.ps1 script version: 0.1.2
+# setup-mediaio.ps1 script version: 0.1.3
 # Installs the Media.io plugin, CLI, and skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
@@ -25,7 +25,7 @@ $ErrorActionPreference = "Stop"
 $script:StepIndex = 0
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
-$script:ScriptVersion = "0.1.2"
+$script:ScriptVersion = "0.1.3"
 $script:ResolvedClaudeMarketplaceName = $null
 $script:UseCodexPersonalMarketplaceFallback = $false
 $script:CodexPersonalMarketplaceFallbackReason = $null
@@ -731,16 +731,6 @@ function Get-MediaIoSkillSourceCandidates {
   }
   $localPluginSkills = Join-Path (Get-LocalMediaIoPluginRoot) "skills"
   $candidates.Add($localPluginSkills)
-  try {
-    $cacheSkills = Join-Path (Get-ClaudePluginCacheRoot) "skills"
-    $candidates.Add($cacheSkills)
-  } catch {}
-  try {
-    if (-not [string]::IsNullOrWhiteSpace([string]$script:ResolvedCodexMarketplaceName)) {
-      $cacheSkills = Join-Path (Get-CodexPluginCacheRoot -MarketplaceName $script:ResolvedCodexMarketplaceName) "skills"
-      $candidates.Add($cacheSkills)
-    }
-  } catch {}
 
   $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
   return @($candidates | Where-Object {
@@ -841,18 +831,10 @@ function Test-MediaIoPluginInstalled {
   $installed = $false
 
   if ($script:ClaudePluginInstalled) {
-    $cacheRoot = Get-ClaudePluginCacheRoot
-    if (-not (Test-Path $cacheRoot)) {
-      throw "Claude Code plugin cache root is missing: $cacheRoot"
-    }
     $installed = $true
   }
 
   if ($script:CodexPluginInstalled) {
-    $cacheRoot = Get-CodexPluginCacheRoot -MarketplaceName $script:ResolvedCodexMarketplaceName
-    if (-not (Test-Path $cacheRoot)) {
-      throw "Codex plugin cache root is missing: $cacheRoot"
-    }
     $installed = $true
   }
 
@@ -897,56 +879,8 @@ function Remove-DirectMediaIoSkillsIfPresent {
   }
 }
 
-function Get-MediaIoPluginManifestCandidates {
-  $manifests = New-Object System.Collections.Generic.List[string]
-  foreach ($root in (Get-MediaIoPluginSourceCandidates)) {
-    $manifests.Add((Join-Path $root ".claude-plugin\plugin.json"))
-    $manifests.Add((Join-Path $root ".codex-plugin\plugin.json"))
-    $manifests.Add((Join-Path $root "plugin.json"))
-  }
-
-  $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-  return @($manifests | Where-Object {
-    -not [string]::IsNullOrWhiteSpace($_) -and $seen.Add([System.IO.Path]::GetFullPath($_))
-  })
-}
-
-function Get-MediaIoPluginVersion {
-  foreach ($manifestPath in (Get-MediaIoPluginManifestCandidates)) {
-    if (-not (Test-Path $manifestPath)) { continue }
-    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-    if (-not [string]::IsNullOrWhiteSpace([string]$manifest.version)) {
-      return [string]$manifest.version
-    }
-  }
-
-  throw "Media.io plugin manifest does not declare a version."
-}
-
 function Get-CodexMarketplaceCheckoutRoot {
   return Join-Path $env:USERPROFILE ".codex\.tmp\marketplaces\$MediaIoCodexMarketplaceName"
-}
-
-function Get-CodexMediaIoPluginVersion {
-  $candidateManifests = New-Object System.Collections.Generic.List[string]
-  $candidateManifests.Add((Join-Path (Get-CodexMarketplaceCheckoutRoot) ".codex-plugin\plugin.json"))
-  if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
-    $candidateManifests.Add((Join-Path $PSScriptRoot ".codex-plugin\plugin.json"))
-    $candidateManifests.Add((Join-Path $PSScriptRoot ".claude-plugin\plugin.json"))
-  }
-  $candidateManifests.Add((Join-Path (Get-LocalMediaIoPluginRoot) ".codex-plugin\plugin.json"))
-  $candidateManifests.Add((Join-Path (Get-LocalMediaIoPluginRoot) "plugin.json"))
-
-  foreach ($manifestPath in $candidateManifests) {
-    if ([string]::IsNullOrWhiteSpace($manifestPath)) { continue }
-    if (-not (Test-Path $manifestPath)) { continue }
-    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-    if (-not [string]::IsNullOrWhiteSpace([string]$manifest.version)) {
-      return [string]$manifest.version
-    }
-  }
-
-  throw "Media.io Codex plugin manifest does not declare a version."
 }
 
 function Get-PersonalMarketplacePath {
@@ -1198,18 +1132,6 @@ function Get-CodexInstalledPluginIds {
   return @($parsed.installed | ForEach-Object { $_.pluginId })
 }
 
-function Get-CodexPluginCacheRoot {
-  param([Parameter(Mandatory = $true)][string]$MarketplaceName)
-
-  $version = Get-CodexMediaIoPluginVersion
-  return (Join-Path $env:USERPROFILE ".codex\plugins\cache\$MarketplaceName\$MediaIoCodexPluginName\$version")
-}
-
-function Get-ClaudePluginCacheRoot {
-  $version = Get-MediaIoPluginVersion
-  return (Join-Path $env:USERPROFILE ".claude\plugins\cache\media-io\media-io\$version")
-}
-
 function Get-ClaudeMarketplaceIds {
   $raw = (& cmd /c "claude plugin marketplace list --json" | Out-String)
   if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
@@ -1272,27 +1194,21 @@ if ($script:ClaudeAvailable) {
     $script:ClaudePluginInstalled = $true
   } -SuccessMessage "Claude Code plugin install completed"
 
-  Invoke-CheckedStep "Verify Claude Code plugin cache" {
+  Invoke-CheckedStep "Verify Claude Code plugin install" {
     if ([string]::IsNullOrWhiteSpace([string]$script:ResolvedClaudeMarketplaceName)) {
       throw "Claude marketplace name was not recorded."
-    }
-
-    $cacheRoot = Get-ClaudePluginCacheRoot
-    if (-not (Test-Path $cacheRoot)) {
-      Add-Warning "Claude Code plugin cache root is missing: $cacheRoot. Treating this as non-blocking because Claude may already have been clean."
-      return
     }
 
     $raw = (& cmd /c "claude plugin list --json" | Out-String)
     $parsed = $raw | ConvertFrom-Json
     $ids = @($parsed | ForEach-Object { $_.id })
     if ($ids -notcontains $MediaIoClaudePluginId) {
-      Add-Warning "Claude Code does not currently list $MediaIoClaudePluginId in the installed plugin list, but the cache root exists."
+      Add-Warning "Claude Code does not currently list $MediaIoClaudePluginId in the installed plugin list."
     } else {
       Write-Host "  OK: Claude Code lists $MediaIoClaudePluginId as installed" -ForegroundColor Green
       $script:ClaudePluginReady = $true
     }
-  } -SuccessMessage "Claude Code plugin cache is present"
+  } -SuccessMessage "Claude Code plugin install verification completed"
 }
 
 if ($script:CodexAvailable) {
@@ -1346,8 +1262,8 @@ if ($script:CodexAvailable) {
 
     if (-not $script:UseCodexPersonalMarketplaceFallback) {
       & cmd /c "codex plugin add $MediaIoCodexPluginName@$MediaIoCodexMarketplaceName"
-      if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Get-CodexPluginCacheRoot -MarketplaceName $MediaIoCodexMarketplaceName))) {
-        Use-CodexPersonalMarketplaceFallback "Codex git marketplace install did not leave an installable cache root for '$MediaIoCodexPluginName@$MediaIoCodexMarketplaceName'."
+      if ($LASTEXITCODE -ne 0) {
+        Use-CodexPersonalMarketplaceFallback "Codex git marketplace install failed for '$MediaIoCodexPluginName@$MediaIoCodexMarketplaceName'."
       } else {
         $script:ResolvedCodexMarketplaceName = $MediaIoCodexMarketplaceName
         $script:CodexPluginInstalled = $true
@@ -1365,39 +1281,31 @@ if ($script:CodexAvailable) {
       if ($LASTEXITCODE -ne 0) {
         throw "codex plugin add $MediaIoCodexPluginName@$installedMarketplaceName failed."
       }
-      if (-not (Test-Path (Get-CodexPluginCacheRoot -MarketplaceName $installedMarketplaceName))) {
-        throw "Codex plugin cache root was not created for marketplace '$installedMarketplaceName'."
-      }
       $script:ResolvedCodexMarketplaceName = $installedMarketplaceName
       $script:CodexPluginInstalled = $true
     }
   } -SuccessMessage "Codex plugin install completed"
 
-  Invoke-CheckedStep "Verify Codex plugin cache" {
+  Invoke-CheckedStep "Verify Codex plugin install" {
     if ([string]::IsNullOrWhiteSpace([string]$script:ResolvedCodexMarketplaceName)) {
       throw "Codex marketplace name was not recorded."
     }
 
-    $cacheRoot = Get-CodexPluginCacheRoot -MarketplaceName $script:ResolvedCodexMarketplaceName
-    if (-not (Test-Path $cacheRoot)) {
-      throw "Codex plugin cache root is missing: $cacheRoot"
-    }
-
     $expectedId = "$MediaIoCodexPluginName@$($script:ResolvedCodexMarketplaceName)"
     try {
-      $availableIds = Get-CodexAvailablePluginIds
-      if ($availableIds -notcontains $expectedId) {
-        Add-Warning "Codex does not currently list $expectedId in the available plugin list, but the cache root exists."
+      $installedIds = Get-CodexInstalledPluginIds
+      if ($installedIds -notcontains $expectedId) {
+        Add-Warning "Codex does not currently list $expectedId in the installed plugin list."
       } else {
-        Write-Host "  OK: Codex lists $expectedId as available" -ForegroundColor Green
+        Write-Host "  OK: Codex lists $expectedId as installed" -ForegroundColor Green
         $script:CodexPluginReady = $true
       }
       $global:LASTEXITCODE = 0
     } catch {
-      Add-Warning "Codex available plugin list could not be read, but the Media.io plugin cache root exists: $($_.Exception.Message)"
+      Add-Warning "Codex installed plugin list could not be read: $($_.Exception.Message)"
       $global:LASTEXITCODE = 0
     }
-  } -SuccessMessage "Codex plugin cache is present"
+  } -SuccessMessage "Codex plugin install verification completed"
 }
 
 $skipDirectSkillsInstall = (@(Get-MediaIoSkillTargetBases).Count -eq 0)
