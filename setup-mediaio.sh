@@ -53,6 +53,7 @@ claude_plugin_ready=0
 codex_plugin_ready=0
 use_personal_marketplace_fallback=0
 personal_marketplace_fallback_reason=
+resolved_personal_marketplace_name=
 resolved_codex_marketplace_name=
 
 append_line() {
@@ -189,6 +190,9 @@ append_path_export_if_missing() {
   printf '\n%s\n' "$export_line" >>"$shell_rc"
 }
 
+# Keyed on the user's login shell, not on $ZSH_VERSION/$BASH_VERSION: those
+# describe whichever shell interprets this script, so the documented
+# "curl ... | sh" usage would always look like bash and never touch .zshrc.
 persist_path_dir_in_shells() {
   path_dir=$1
   updated=0
@@ -198,19 +202,29 @@ persist_path_dir_in_shells() {
     *) PATH=$path_dir:$PATH ;;
   esac
 
-  if [ -n "${ZSH_VERSION:-}" ] && [ -n "${HOME:-}" ]; then
-    append_path_export_if_missing "$HOME/.zshrc" "$path_dir"
-    updated=1
-  fi
+  [ -n "${HOME:-}" ] || return 0
 
-  if [ -n "${BASH_VERSION:-}" ] && [ -n "${HOME:-}" ]; then
-    append_path_export_if_missing "$HOME/.bashrc" "$path_dir"
-    append_path_export_if_missing "$HOME/.bash_profile" "$path_dir"
-    updated=1
-  fi
+  login_shell=${SHELL:-}
+  login_shell=${login_shell##*/}
 
-  if [ "$updated" -eq 0 ] && [ -n "${HOME:-}" ]; then
+  case "$login_shell" in
+    zsh)
+      append_path_export_if_missing "$HOME/.zshrc" "$path_dir"
+      updated=1
+      ;;
+    bash)
+      append_path_export_if_missing "$HOME/.bashrc" "$path_dir"
+      append_path_export_if_missing "$HOME/.bash_profile" "$path_dir"
+      updated=1
+      ;;
+  esac
+
+  # Unknown or unset $SHELL: fall back to the POSIX profile, plus any rc file
+  # that already exists, so an interactive shell still picks the directory up.
+  if [ "$updated" -eq 0 ]; then
     append_path_export_if_missing "$HOME/.profile" "$path_dir"
+    [ ! -f "$HOME/.zshrc" ] || append_path_export_if_missing "$HOME/.zshrc" "$path_dir"
+    [ ! -f "$HOME/.bashrc" ] || append_path_export_if_missing "$HOME/.bashrc" "$path_dir"
   fi
 }
 
@@ -516,11 +530,15 @@ get_skill_target_agent_args() {
 test_mediaio_skill_set_in_base() {
   base=$1
   skill_count=0
-  for skill_name in $(get_mediaio_skill_names); do
+  # Read line by line: a skill directory name may contain spaces, which an
+  # unquoted "for ... in $(...)" would split into separate names.
+  while IFS= read -r skill_name; do
     [ -n "$skill_name" ] || continue
     skill_count=$((skill_count + 1))
     [ -f "$base/$skill_name/SKILL.md" ] || return 1
-  done
+  done <<EOF
+$(get_mediaio_skill_names)
+EOF
   [ "$skill_count" -gt 0 ]
 }
 
@@ -770,7 +788,11 @@ initialize_local_mediaio_plugin_root() {
   [ -z "$temp_dir" ] || rm -rf "$temp_dir"
 }
 
+# Reports the marketplace name through $resolved_personal_marketplace_name rather
+# than stdout: this function also emits progress and warnings, which would end up
+# inside the value if callers captured it with a command substitution.
 initialize_personal_marketplace_fallback() {
+  resolved_personal_marketplace_name=
   marketplace_path=$(get_personal_marketplace_path)
   marketplace_name=$(get_personal_marketplace_name)
   display_name=$(format_display_name_from_name "$marketplace_name")
@@ -811,8 +833,10 @@ initialize_personal_marketplace_fallback() {
 
   mkdir -p "$(dirname "$marketplace_path")"
   write_json_no_bom "$marketplace_path" "$payload"
-  initialize_local_mediaio_plugin_root
-  printf '%s\n' "$marketplace_name"
+  # The marketplace entry points at ./plugins/media-io, so a missing plugin root
+  # would leave Codex with a dangling local source.
+  initialize_local_mediaio_plugin_root || return 1
+  resolved_personal_marketplace_name=$marketplace_name
 }
 
 install_skill_files() {
@@ -828,12 +852,7 @@ test_skill_directories_present() {
     while IFS= read -r base; do
       [ -n "$base" ] || continue
       base_count=$((base_count + 1))
-      skill_count=0
-      for skill_name in $(get_mediaio_skill_names); do
-        skill_count=$((skill_count + 1))
-        [ -f "$base/$skill_name/SKILL.md" ] || exit 1
-      done
-      [ "$skill_count" -gt 0 ] || exit 1
+      test_mediaio_skill_set_in_base "$base" || exit 1
     done
     [ "$base_count" -gt 0 ] || exit 1
     exit 0
@@ -844,9 +863,12 @@ test_any_direct_skill_directories_present() {
   get_all_skill_target_bases | {
     while IFS= read -r base; do
       [ -n "$base" ] || continue
-      for skill_name in $(get_mediaio_skill_names); do
+      while IFS= read -r skill_name; do
+        [ -n "$skill_name" ] || continue
         [ -d "$base/$skill_name" ] && exit 0
-      done
+      done <<EOF
+$(get_mediaio_skill_names)
+EOF
     done
     exit 1
   }
@@ -909,7 +931,9 @@ if [ "$codex_available" -eq 1 ]; then
       resolved_codex_marketplace_name=$MediaIoCodexMarketplaceName
     else
       use_codex_personal_marketplace_fallback "Codex git marketplace install failed for '\''$MediaIoCodexPluginName@$MediaIoCodexMarketplaceName'\''."
-      installed_marketplace_name=$(initialize_personal_marketplace_fallback)
+      initialize_personal_marketplace_fallback || return 1
+      installed_marketplace_name=$resolved_personal_marketplace_name
+      [ -n "$installed_marketplace_name" ] || return 1
       printf "  Installing through Codex personal marketplace fallback: %s@%s\n" "$MediaIoCodexPluginName" "$installed_marketplace_name"
       printf "  Personal marketplace file: %s\n" "$(get_personal_marketplace_path)"
       codex plugin add "$MediaIoCodexPluginName@$installed_marketplace_name" || return 1
