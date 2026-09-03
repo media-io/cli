@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# setup-mediaio.sh script version: 0.1.4
+# setup-mediaio.sh script version: 0.1.5
 set -euo pipefail
 
-SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 step_index=0
 failures=()
 warnings=()
-SCRIPT_VERSION="0.1.4"
+SCRIPT_VERSION="0.1.5"
 MediaIoPackageName="${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}"
 MediaIoInstallDir="${MEDIAIO_INSTALL_DIR:-$HOME/.local/bin}"
 MediaIoNpmRegistry="${MEDIAIO_NPM_REGISTRY:-https://registry.npmjs.org}"

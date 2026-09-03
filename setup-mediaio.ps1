@@ -1,5 +1,5 @@
 # Media.io setup script for Windows.
-# setup-mediaio.ps1 script version: 0.1.4
+# setup-mediaio.ps1 script version: 0.1.5
 # Installs the Media.io plugin, CLI, and skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
@@ -25,7 +25,7 @@ $ErrorActionPreference = "Stop"
 $script:StepIndex = 0
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
-$script:ScriptVersion = "0.1.4"
+$script:ScriptVersion = "0.1.5"
 $script:ResolvedClaudeMarketplaceName = $null
 $script:UseCodexPersonalMarketplaceFallback = $false
 $script:CodexPersonalMarketplaceFallbackReason = $null
