@@ -1,5 +1,5 @@
 [CmdletBinding()]
-# uninstall-mediaio.ps1 script version: 0.1.2
+# uninstall-mediaio.ps1 script version: 0.1.4
 param()
 
 Set-StrictMode -Version Latest
@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 $script:StepIndex = 0
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
-$script:ScriptVersion = "0.1.2"
+$script:ScriptVersion = "0.1.4"
 
 $MediaIoPackageName = if ($env:MEDIAIO_NPM_PACKAGE) { $env:MEDIAIO_NPM_PACKAGE } else { "@mediaio/cli" }
 $MediaIoInstallDir = if ($env:MEDIAIO_INSTALL_DIR) { $env:MEDIAIO_INSTALL_DIR } else { Join-Path $HOME ".local\bin" }

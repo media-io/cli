@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-mediaio.sh script version: 0.1.2
+# setup-mediaio.sh script version: 0.1.4
 set -euo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,7 +7,7 @@ SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 step_index=0
 failures=()
 warnings=()
-SCRIPT_VERSION="0.1.2"
+SCRIPT_VERSION="0.1.4"
 MediaIoPackageName="${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}"
 MediaIoInstallDir="${MEDIAIO_INSTALL_DIR:-$HOME/.local/bin}"
 MediaIoNpmRegistry="${MEDIAIO_NPM_REGISTRY:-https://registry.npmjs.org}"
@@ -481,28 +481,15 @@ get_mediaio_plugin_source_root() {
   get_mediaio_plugin_source_candidates
 }
 
-get_mediaio_plugin_version() {
-  local manifest_path
-  manifest_path="$(get_mediaio_plugin_source_root)/.codex-plugin/plugin.json"
-  node -e '
-    const fs = require("fs");
-    const path = process.argv[1];
-    if (!fs.existsSync(path)) process.exit(2);
-    const manifest = JSON.parse(fs.readFileSync(path, "utf8"));
-    if (!manifest.version) process.exit(3);
-    process.stdout.write(String(manifest.version));
-  ' "$manifest_path"
-}
-
 get_local_mediaio_plugin_root() {
   printf '%s\n' "$HOME/plugins/media-io"
 }
 
 get_skill_target_bases() {
-  if [[ "$codex_available" -eq 1 && "$codex_plugin_installed" -eq 0 ]]; then
+  if [[ "$codex_available" -eq 1 && "$codex_plugin_ready" -eq 0 ]]; then
     printf '%s\n' "$HOME/.codex/skills"
   fi
-  if [[ "$claude_available" -eq 1 && "$claude_plugin_installed" -eq 0 ]]; then
+  if [[ "$claude_available" -eq 1 && "$claude_plugin_ready" -eq 0 ]]; then
     printf '%s\n' "$HOME/.claude/skills"
   fi
 }
@@ -518,10 +505,10 @@ get_all_skill_target_bases() {
 
 get_skill_target_agent_args() {
   local agents=()
-  if [[ "$codex_available" -eq 1 && "$codex_plugin_installed" -eq 0 ]]; then
+  if [[ "$codex_available" -eq 1 && "$codex_plugin_ready" -eq 0 ]]; then
     agents+=("-a codex")
   fi
-  if [[ "$claude_available" -eq 1 && "$claude_plugin_installed" -eq 0 ]]; then
+  if [[ "$claude_available" -eq 1 && "$claude_plugin_ready" -eq 0 ]]; then
     agents+=("-a claude-code")
   fi
 
@@ -582,6 +569,56 @@ get_mediaio_skill_names() {
   if [[ "$found" -eq 0 ]]; then
     get_default_mediaio_skill_names
   fi
+}
+
+test_mediaio_skill_set_in_base() {
+  local base="$1" skill_name skill_count=0
+  while IFS= read -r skill_name; do
+    [[ -n "$skill_name" ]] || continue
+    skill_count=$((skill_count + 1))
+    [[ -f "$base/$skill_name/SKILL.md" ]] || return 1
+  done < <(get_mediaio_skill_names)
+
+  [[ $skill_count -gt 0 ]]
+}
+
+test_claude_plugin_provided_skills_present() {
+  local namespace_root="$HOME/.claude/plugins/cache/media-io/media-io"
+  [[ -d "$namespace_root" ]] || return 1
+
+  if test_mediaio_skill_set_in_base "$namespace_root/skills"; then
+    return 0
+  fi
+
+  local root
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    if test_mediaio_skill_set_in_base "$root/skills"; then
+      return 0
+    fi
+  done < <(find "$namespace_root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort -r)
+
+  return 1
+}
+
+test_codex_plugin_provided_skills_present() {
+  local marketplace_name="$1"
+  local namespace_root="$HOME/.codex/plugins/cache/$marketplace_name/media-io"
+  [[ -d "$namespace_root" ]] || return 1
+
+  if test_mediaio_skill_set_in_base "$namespace_root/skills"; then
+    return 0
+  fi
+
+  local root
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    if test_mediaio_skill_set_in_base "$root/skills"; then
+      return 0
+    fi
+  done < <(find "$namespace_root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort -r)
+
+  return 1
 }
 
 get_personal_marketplace_path() {
@@ -735,19 +772,6 @@ get_claude_marketplace_ids() {
   '
 }
 
-get_codex_plugin_cache_root() {
-  local marketplace_name="$1"
-  local version
-  version="$(get_mediaio_plugin_version)"
-  printf '%s\n' "$HOME/.codex/plugins/cache/$marketplace_name/media-io/$version"
-}
-
-get_claude_plugin_cache_root() {
-  local version
-  version="$(get_mediaio_plugin_version)"
-  printf '%s\n' "$HOME/.claude/plugins/cache/media-io/media-io/$version"
-}
-
 install_skill_files_from_npx() {
   local agent_args
   agent_args="$(get_skill_target_agent_args)" || return 1
@@ -840,24 +864,6 @@ test_any_direct_skill_directories_present() {
   return 1
 }
 
-test_claude_plugin_cache_present() {
-  [[ -d "$(get_claude_plugin_cache_root)" ]]
-}
-
-test_codex_plugin_cache_present() {
-  local cache_root
-  for cache_root in \
-    "$(get_codex_plugin_cache_root "$(get_personal_marketplace_name)")" \
-    "$(get_codex_plugin_cache_root media-io)"
-  do
-    if [[ -d "$cache_root" ]]; then
-      return 0
-    fi
-  done
-
-  return 1
-}
-
 verify_mediaio_cli_available() {
   if command -v mediaio >/dev/null 2>&1; then
     mediaio version >/dev/null 2>&1
@@ -906,14 +912,9 @@ if [[ "$claude_available" -eq 1 ]]; then
     if ! claude plugin install media-io@media-io -s user -y; then
       return 1
     fi
-    if ! [[ -d "$(get_claude_plugin_cache_root)" ]]; then
-      return 1
-    fi
     claude_plugin_installed=1
   ' "" "Claude Code plugin install completed"
-  invoke_checked_step "Verify Claude Code plugin cache" '
-    cache_root="$(get_claude_plugin_cache_root)"
-    [[ -d "$cache_root" ]]
+  invoke_checked_step "Verify Claude Code plugin install" '
     raw="$(claude plugin list --json 2>/dev/null || true)"
     if [[ -n "$raw" ]]; then
       if ! node -e '"'"'
@@ -921,13 +922,18 @@ if [[ "$claude_available" -eq 1 ]]; then
         const ids = Array.isArray(payload) ? payload.map((entry) => entry && entry.id).filter(Boolean) : [];
         if (!ids.includes("media-io@media-io")) process.exit(1);
       '"'"' "$raw"; then
-        add_warning "Claude Code does not currently list media-io@media-io in the installed plugin list, but the cache root exists."
+        add_warning "Claude Code does not currently list media-io@media-io in the installed plugin list."
       else
         printf '"'"'  OK: Claude Code lists media-io@media-io as installed\n'"'"'
-        claude_plugin_ready=1
       fi
     fi
-  ' "" "Claude Code plugin cache is present"
+    if test_claude_plugin_provided_skills_present; then
+      printf '"'"'  OK: Claude Code plugin-provided skills are present\n'"'"'
+      claude_plugin_ready=1
+    else
+      add_warning "Claude Code plugin-provided skills are missing; direct skills install will be attempted with npx."
+    fi
+  ' "" "Claude Code plugin install verification completed"
 fi
 
 if [[ "$codex_available" -eq 1 ]]; then
@@ -971,12 +977,7 @@ if [[ "$codex_available" -eq 1 ]]; then
 
     if [[ "$use_personal_marketplace_fallback" -eq 0 ]]; then
       if codex plugin add media-io@media-io; then
-        if [[ -d "$(get_codex_plugin_cache_root media-io)" ]]; then
-          resolved_codex_marketplace_name="media-io"
-        else
-          add_warning "The git marketplace install did not leave an installable cache root. Switching to the personal marketplace fallback."
-          use_personal_marketplace_fallback=1
-        fi
+        resolved_codex_marketplace_name="media-io"
       else
         add_warning "The git marketplace install failed. Switching to the personal marketplace fallback."
         use_personal_marketplace_fallback=1
@@ -985,31 +986,33 @@ if [[ "$codex_available" -eq 1 ]]; then
 
     if [[ "$use_personal_marketplace_fallback" -eq 1 ]]; then
       installed_marketplace_name="$(initialize_personal_marketplace_fallback)"
-      codex plugin add "media-io@$installed_marketplace_name"
-      if ! [[ -d "$(get_codex_plugin_cache_root "$installed_marketplace_name")" ]]; then
+      if ! codex plugin add "media-io@$installed_marketplace_name"; then
         return 1
       fi
       resolved_codex_marketplace_name="$installed_marketplace_name"
     fi
     codex_plugin_installed=1
   ' "" "Codex plugin install completed"
-  invoke_checked_step "Verify Codex plugin cache" '
+  invoke_checked_step "Verify Codex plugin install" '
     [[ -n "$resolved_codex_marketplace_name" ]]
-    cache_root="$(get_codex_plugin_cache_root "$resolved_codex_marketplace_name")"
-    [[ -d "$cache_root" ]]
-    available_ids="$(get_codex_available_plugin_ids)"
+    installed_ids="$(get_codex_installed_plugin_ids)"
     expected_id="media-io@$resolved_codex_marketplace_name"
     if ! node -e '"'"'
       const ids = JSON.parse(process.argv[1]);
       const expected = process.argv[2];
       if (!ids.includes(expected)) process.exit(1);
-    '"'"' "$available_ids" "$expected_id"; then
-      add_warning "Codex does not currently list $expected_id in the available plugin list, but the cache root exists."
+    '"'"' "$installed_ids" "$expected_id"; then
+      add_warning "Codex does not currently list $expected_id in the installed plugin list."
     else
-      printf '"'"'  OK: Codex lists %s as available\n'"'"' "$expected_id"
-      codex_plugin_ready=1
+      printf '"'"'  OK: Codex lists %s as installed\n'"'"' "$expected_id"
     fi
-  ' "" "Codex plugin cache is present"
+    if test_codex_plugin_provided_skills_present "$resolved_codex_marketplace_name"; then
+      printf '"'"'  OK: Codex plugin-provided skills are present\n'"'"'
+      codex_plugin_ready=1
+    else
+      add_warning "Codex plugin-provided skills are missing; direct skills install will be attempted with npx."
+    fi
+  ' "" "Codex plugin install verification completed"
 fi
 
 if [[ -z "$(get_skill_target_agent_args || true)" ]]; then
@@ -1027,12 +1030,6 @@ else
 fi
 
 if [[ "$claude_plugin_installed" -eq 1 || "$codex_plugin_installed" -eq 1 ]]; then
-  if [[ "$claude_plugin_installed" -eq 1 ]] && ! test_claude_plugin_cache_present; then
-    add_failure "Final verification - Claude Code plugin cache is still missing."
-  fi
-  if [[ "$codex_plugin_installed" -eq 1 ]] && ! test_codex_plugin_cache_present; then
-    add_failure "Final verification - Codex plugin cache is still missing."
-  fi
   if [[ "$claude_plugin_ready" -eq 1 || "$codex_plugin_ready" -eq 1 ]]; then
     if test_any_direct_skill_directories_present; then
       add_warning "Residual direct Media.io skill directories still exist alongside the plugin install."
