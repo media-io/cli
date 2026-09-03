@@ -1,4 +1,5 @@
 # Media.io setup script for Windows.
+# setup-mediaio.ps1 script version: 0.1.0
 # Installs the Media.io plugin, CLI, and skills in one pass.
 # CLI prefers npm and falls back to a release archive; skills prefer local installers and fall back to npm/npx only when needed.
 #
@@ -24,6 +25,7 @@ $ErrorActionPreference = "Stop"
 $script:StepIndex = 0
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
+$script:ScriptVersion = "0.1.0"
 $script:ResolvedClaudeMarketplaceName = $null
 $script:UseCodexPersonalMarketplaceFallback = $false
 $script:ResolvedCodexMarketplaceName = $null
@@ -32,6 +34,8 @@ $script:ClaudeAvailable = $false
 $script:CodexAvailable = $false
 $script:ClaudePluginInstalled = $false
 $script:CodexPluginInstalled = $false
+$script:ClaudePluginReady = $false
+$script:CodexPluginReady = $false
 
 $MediaIoPackageName = if ($env:MEDIAIO_NPM_PACKAGE) { $env:MEDIAIO_NPM_PACKAGE } else { "@mediaio/cli" }
 $MediaIoMarketplaceSource = if ($env:MEDIAIO_MARKETPLACE_SOURCE) { $env:MEDIAIO_MARKETPLACE_SOURCE } else { "media-io/plugin" }
@@ -822,6 +826,10 @@ function Get-LocalMediaIoSkillDirs {
   return @()
 }
 
+function Get-MediaIoSkillNames {
+  @(Get-LocalMediaIoSkillDirs | ForEach-Object { $_.Name })
+}
+
 function Get-MediaIoSkillTargetBases {
   $targets = @()
   if ($script:CodexAvailable) {
@@ -897,9 +905,14 @@ function Test-MediaIoSkillsInstalled {
     return
   }
 
+  $skillNames = @(Get-MediaIoSkillNames)
+  if ($skillNames.Count -eq 0) {
+    throw "No Media.io skill names were found in the local skills directory."
+  }
   foreach ($target in $targets) {
-    $requiredPaths += Join-Path $target.BaseDir "mediaio-generate\SKILL.md"
-    $requiredPaths += Join-Path $target.BaseDir "mediaio-install\SKILL.md"
+    foreach ($skillName in $skillNames) {
+      $requiredPaths += Join-Path $target.BaseDir "$skillName\SKILL.md"
+    }
   }
 
   $missing = @()
@@ -931,6 +944,7 @@ function Invoke-MediaIoSkillInstall {
   } {
     Ensure-NodeAndNpm
     $agentArgs = Get-MediaIoSkillAgentArgs
+    Write-Host "  Using npx fallback to install Media.io skills" -ForegroundColor DarkGray
     & cmd /c "npx --yes skills add $MediaIoSkillRepo -g $agentArgs --skill * -y"
   } {
     Test-MediaIoSkillsInstalled
@@ -964,15 +978,32 @@ function Test-MediaIoIntegrationInstalled {
   Test-MediaIoSkillsInstalled
 }
 
-function Remove-DirectMediaIoSkillsIfPresent {
-  $paths = @(
-    (Join-Path $HOME ".codex\skills\mediaio-generate"),
-    (Join-Path $HOME ".codex\skills\mediaio-install"),
-    (Join-Path $HOME ".claude\skills\mediaio-generate"),
-    (Join-Path $HOME ".claude\skills\mediaio-install")
-  )
+function Invoke-MediaIoAuth {
+  Write-Step "Authenticate Media.io"
 
-  foreach ($path in $paths) {
+  try {
+    $raw = (& cmd /c "mediaio whoami" 2>&1 | Out-String)
+    if ($LASTEXITCODE -eq 0) {
+      Write-Host "  OK: already signed in" -ForegroundColor Green
+      return
+    }
+
+    Write-Host "  Run `mediaio whoami` first." -ForegroundColor Cyan
+    Write-Host "  If not signed in, run `mediaio auth login` and complete sign-in in the browser it opens." -ForegroundColor Cyan
+  } catch {
+    Write-Host "  Run `mediaio whoami` first." -ForegroundColor Cyan
+    Write-Host "  If not signed in, run `mediaio auth login` and complete sign-in in the browser it opens." -ForegroundColor Cyan
+  }
+}
+
+function Remove-DirectMediaIoSkillsIfPresent {
+  $paths = New-Object System.Collections.Generic.List[string]
+  foreach ($skillName in @(Get-MediaIoSkillNames)) {
+    $paths.Add((Join-Path $HOME ".codex\skills\$skillName"))
+    $paths.Add((Join-Path $HOME ".claude\skills\$skillName"))
+  }
+
+  foreach ($path in @($paths | Select-Object -Unique)) {
     if (Test-Path $path) {
       Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
       Write-Host "  Removed duplicate direct skill: $path" -ForegroundColor DarkGray
@@ -1255,6 +1286,14 @@ function Get-CodexAvailablePluginIds {
   return @($parsed.available | ForEach-Object { $_.pluginId })
 }
 
+function Get-CodexInstalledPluginIds {
+  $raw = (& cmd /c "codex plugin list --json --available" | Out-String)
+  if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
+
+  $parsed = $raw | ConvertFrom-Json
+  return @($parsed.installed | ForEach-Object { $_.pluginId })
+}
+
 function Get-CodexPluginCacheRoot {
   param([Parameter(Mandatory = $true)][string]$MarketplaceName)
 
@@ -1276,6 +1315,7 @@ function Get-ClaudeMarketplaceIds {
 }
 
 Write-Host "Media.io setup script" -ForegroundColor White
+Write-Host "Script version: $script:ScriptVersion" -ForegroundColor DarkGray
 Write-Host "This script installs the Media.io plugin, CLI, and skills. The CLI prefers npm and falls back to a release archive; skills prefer local installers and fall back to npm/npx only when needed." -ForegroundColor DarkGray
 
 Invoke-OptionalHostDetection "Preflight: locate claude" "claude" {
@@ -1346,6 +1386,7 @@ if ($script:ClaudeAvailable) {
       Add-Warning "Claude Code does not currently list $MediaIoClaudePluginId in the installed plugin list, but the cache root exists."
     } else {
       Write-Host "  OK: Claude Code lists $MediaIoClaudePluginId as installed" -ForegroundColor Green
+      $script:ClaudePluginReady = $true
     }
   } -SuccessMessage "Claude Code plugin cache is present"
 }
@@ -1367,8 +1408,14 @@ if ($script:CodexAvailable) {
 
   if (-not $script:UseCodexPersonalMarketplaceFallback) {
     if (-not (Invoke-SoftStep "Verify Codex marketplace visibility" {
-      $availableIds = Get-CodexAvailablePluginIds
       $expectedId = "$MediaIoCodexPluginName@$MediaIoCodexMarketplaceName"
+      $installedIds = Get-CodexInstalledPluginIds
+      if ($installedIds -contains $expectedId) {
+        Write-Host "  OK: Codex plugin $expectedId is already installed" -ForegroundColor Green
+        return
+      }
+
+      $availableIds = Get-CodexAvailablePluginIds
       if ($availableIds -contains $expectedId) {
         Write-Host "  OK: Codex can see $expectedId in the git marketplace snapshot" -ForegroundColor Green
       } else {
@@ -1424,6 +1471,7 @@ if ($script:CodexAvailable) {
         Add-Warning "Codex does not currently list $expectedId in the available plugin list, but the cache root exists."
       } else {
         Write-Host "  OK: Codex lists $expectedId as available" -ForegroundColor Green
+        $script:CodexPluginReady = $true
       }
       $global:LASTEXITCODE = 0
     } catch {
@@ -1433,9 +1481,9 @@ if ($script:CodexAvailable) {
   } -SuccessMessage "Codex plugin cache is present"
 }
 
-if ($script:ClaudePluginInstalled -or $script:CodexPluginInstalled) {
+$skipDirectSkillsInstall = ($script:ClaudePluginReady -or $script:CodexPluginReady)
+if ($skipDirectSkillsInstall) {
   Write-Step "Skip direct Media.io skills install"
-  Remove-DirectMediaIoSkillsIfPresent
   Write-Host "  OK: plugin-provided skills are installed; direct skills install is skipped to avoid duplicate entries" -ForegroundColor Green
 } else {
   Invoke-MediaIoSkillInstall | Out-Null
@@ -1450,6 +1498,16 @@ try {
   }
   Test-MediaIoIntegrationInstalled
   Write-Host "  OK: mediaio version responded and Media.io integration is present" -ForegroundColor Green
+  if ($skipDirectSkillsInstall) {
+    $skillPaths = New-Object System.Collections.Generic.List[string]
+    foreach ($skillName in @(Get-MediaIoSkillNames)) {
+      $skillPaths.Add((Join-Path $HOME ".codex\skills\$skillName"))
+      $skillPaths.Add((Join-Path $HOME ".claude\skills\$skillName"))
+    }
+    if (@($skillPaths | Where-Object { Test-Path $_ }).Count -gt 0) {
+      Add-Warning "Residual direct Media.io skill directories still exist alongside the plugin install."
+    }
+  }
 } catch {
   Add-Failure "Final verification - $($_.Exception.Message)"
 }
@@ -1475,3 +1533,4 @@ Write-Host "Setup finished successfully." -ForegroundColor Green
 if ($script:Warnings.Count -gt 0) {
   Write-Host "Warnings were emitted, but the required files and commands are present." -ForegroundColor Yellow
 }
+Invoke-MediaIoAuth
