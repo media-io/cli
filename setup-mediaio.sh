@@ -11,13 +11,20 @@ failures=
 warnings=
 SCRIPT_VERSION="0.1.5"
 MediaIoPackageName=${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}
+MediaIoMarketplaceSource=${MEDIAIO_MARKETPLACE_SOURCE:-media-io/plugin}
+MediaIoClaudePluginId=${MEDIAIO_CLAUDE_PLUGIN_ID:-media-io@media-io}
+MediaIoCodexPluginName=${MEDIAIO_CODEX_PLUGIN_NAME:-media-io}
+MediaIoCodexMarketplaceName=${MEDIAIO_CODEX_MARKETPLACE_NAME:-media-io}
 MediaIoInstallDir=${MEDIAIO_INSTALL_DIR:-"$HOME/.local/bin"}
+MediaIoNpmRegistry=${MEDIAIO_NPM_REGISTRY:-https://registry.npmjs.org}
 MediaIoReleaseRepo=${MEDIAIO_RELEASE_REPO:-media-io/cli}
 MediaIoReleaseBaseUrl=${MEDIAIO_RELEASE_BASE_URL:-"https://github.com/$MediaIoReleaseRepo/releases/download"}
 MediaIoReleaseApiUrl=${MEDIAIO_RELEASE_API_URL:-"https://api.github.com/repos/$MediaIoReleaseRepo/releases/latest"}
 MediaIoVersion=${MEDIAIO_VERSION:-latest}
 MediaIoBinaryUrl=${MEDIAIO_BINARY_URL:-}
 MediaIoChecksumUrl=${MEDIAIO_CHECKSUM_URL:-}
+MediaIoSkillRepo=${MEDIAIO_SKILL_REPO:-media-io/plugin}
+MediaIoPluginArchiveUrl=${MEDIAIO_PLUGIN_ARCHIVE_URL:-https://github.com/media-io/plugin/archive/refs/heads/main.zip}
 MediaIoNodeInstallRoot=${MEDIAIO_NODE_INSTALL_DIR:-"$HOME/.local/share/mediaio/node"}
 MediaIoNodeCurrentDir=$MediaIoNodeInstallRoot/current
 MediaIoNodeBinDir=$MediaIoNodeCurrentDir/bin
@@ -423,7 +430,7 @@ get_mediaio_plugin_source_root() {
     printf '%s\n' "$MEDIAIO_PLUGIN_SOURCE"
     return 0
   fi
-  for candidate in "$SCRIPT_ROOT/../media-plugin-main" "$SCRIPT_ROOT/../plugins/media-io" "$HOME/.codex/.tmp/marketplaces/media-io"; do
+  for candidate in "$SCRIPT_ROOT" "$SCRIPT_ROOT/../media-plugin-main" "$SCRIPT_ROOT/../plugins/media-io" "$HOME/.codex/.tmp/marketplaces/$MediaIoCodexMarketplaceName" "$(get_local_mediaio_plugin_root)"; do
     if [ -f "$candidate/.codex-plugin/plugin.json" ]; then
       printf '%s\n' "$candidate"
       return 0
@@ -433,12 +440,12 @@ get_mediaio_plugin_source_root() {
 }
 
 get_mediaio_skill_source_root() {
-  if [ -n "${MEDIAIO_SKILL_SOURCE:-}" ] && [ -d "$MEDIAIO_SKILL_SOURCE/skills" ]; then
+  if [ -n "${MEDIAIO_SKILL_SOURCE:-}" ] && [ -d "$MEDIAIO_SKILL_SOURCE" ]; then
     printf '%s\n' "$MEDIAIO_SKILL_SOURCE"
     return 0
   fi
-  for candidate in "$SCRIPT_ROOT" "$SCRIPT_ROOT/../media-plugin-main" "$SCRIPT_ROOT/../plugins/media-io" "$(get_local_mediaio_plugin_root)"; do
-    if [ -d "$candidate/skills" ]; then
+  for candidate in "$SCRIPT_ROOT/skills" "$SCRIPT_ROOT/../media-plugin-main/skills" "$SCRIPT_ROOT/../plugins/media-io/skills" "$(get_local_mediaio_plugin_root)/skills"; do
+    if [ -d "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0
     fi
@@ -448,11 +455,11 @@ get_mediaio_skill_source_root() {
 
 get_mediaio_skill_names() {
   source_root=$(get_mediaio_skill_source_root 2>/dev/null || true)
-  if [ -z "$source_root" ] || [ ! -d "$source_root/skills" ]; then
+  if [ -z "$source_root" ] || [ ! -d "$source_root" ]; then
     get_default_mediaio_skill_names
     return 0
   fi
-  skill_names=$(find "$source_root/skills" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | while IFS= read -r skill_dir; do
+  skill_names=$(find "$source_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | while IFS= read -r skill_dir; do
     [ -n "$skill_dir" ] || continue
     [ -f "$skill_dir/SKILL.md" ] && basename "$skill_dir"
   done)
@@ -515,7 +522,7 @@ test_claude_plugin_provided_skills_present() {
 
 test_codex_plugin_provided_skills_present() {
   marketplace_name=$1
-  namespace_root=$HOME/.codex/plugins/cache/$marketplace_name/media-io
+  namespace_root=$HOME/.codex/plugins/cache/$marketplace_name/$MediaIoCodexPluginName
   [ -d "$namespace_root" ] || return 1
   test_mediaio_skill_set_in_base "$namespace_root/skills" && return 0
   find "$namespace_root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort -r | {
@@ -570,7 +577,24 @@ write_json_no_bom() {
 }
 
 initialize_local_mediaio_plugin_root() {
-  source_root=$(get_mediaio_plugin_source_root) || return 1
+  source_root=$(get_mediaio_plugin_source_root 2>/dev/null || true)
+  temp_dir=
+  if [ -z "$source_root" ]; then
+    require_command curl || return 1
+    require_command unzip || return 1
+    temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/mediaio-plugin.XXXXXX")
+    archive_path=$temp_dir/mediaio-plugin.zip
+    printf '  Downloading Media.io plugin source from %s\n' "$MediaIoPluginArchiveUrl"
+    curl -fsSL "$MediaIoPluginArchiveUrl" -o "$archive_path" || {
+      rm -rf "$temp_dir"
+      return 1
+    }
+    unzip -q "$archive_path" -d "$temp_dir" || {
+      rm -rf "$temp_dir"
+      return 1
+    }
+    source_root=$(find "$temp_dir" -type f -path '*/.codex-plugin/plugin.json' 2>/dev/null | sed 's|/.codex-plugin/plugin.json$||' | head -n 1)
+  fi
   source_manifest=$source_root/.codex-plugin/plugin.json
   plugin_root=$(get_local_mediaio_plugin_root)
   [ -d "$source_root" ] || return 1
@@ -583,6 +607,7 @@ initialize_local_mediaio_plugin_root() {
     cp -R "$source_root"/. "$plugin_root"/
   fi
   cp "$source_manifest" "$plugin_root/plugin.json"
+  [ -z "$temp_dir" ] || rm -rf "$temp_dir"
 }
 
 initialize_personal_marketplace_fallback() {
@@ -591,8 +616,21 @@ initialize_personal_marketplace_fallback() {
   display_name=$(format_display_name_from_name "$marketplace_name")
 
   if [ -f "$marketplace_path" ]; then
-    payload=$(node -e 'const fs=require("fs"); process.stdout.write(fs.readFileSync(process.argv[1],"utf8"));' "$marketplace_path")
+    payload=$(node -e '
+      const fs = require("fs");
+      const path = process.argv[1];
+      const raw = fs.readFileSync(path, "utf8");
+      JSON.parse(raw);
+      process.stdout.write(raw);
+    ' "$marketplace_path" 2>/dev/null) || {
+      add_warning "Personal marketplace file exists but could not be parsed cleanly. It will be recreated."
+      payload=
+    }
   else
+    payload=
+  fi
+
+  if [ -z "$payload" ]; then
     payload="{\"name\":\"$marketplace_name\",\"interface\":{\"displayName\":\"$display_name\"},\"plugins\":[]}"
   fi
 
@@ -603,13 +641,13 @@ initialize_personal_marketplace_fallback() {
     payload.interface.displayName = String(payload.interface.displayName || process.argv[3]).trim() || process.argv[3];
     payload.plugins = Array.isArray(payload.plugins) ? payload.plugins.filter((entry) => entry && entry.name !== "media-io") : [];
     payload.plugins.push({
-      name: "media-io",
+      name: process.argv[4],
       source: { source: "local", path: "./plugins/media-io" },
       policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
       category: "Design"
     });
     process.stdout.write(JSON.stringify(payload));
-  ' "$payload" "$marketplace_name" "$display_name")
+  ' "$payload" "$marketplace_name" "$display_name" "$MediaIoCodexPluginName")
 
   mkdir -p "$(dirname "$marketplace_path")"
   write_json_no_bom "$marketplace_path" "$payload"
@@ -620,7 +658,8 @@ initialize_personal_marketplace_fallback() {
 install_skill_files() {
   agent_args=$(get_skill_target_agent_args) || return 1
   printf '  Installing Media.io skills with npx\n'
-  npx --yes skills add media-io/plugin -g $agent_args --skill '*' -y
+  ensure_node_and_npm || return 1
+  npx --yes skills add "$MediaIoSkillRepo" -g $agent_args --skill '*' -y
 }
 
 test_skill_directories_present() {
@@ -681,26 +720,26 @@ invoke_optional_fallback_step "Install Media.io CLI" "ensure_node_and_npm && ins
 invoke_checked_step "Run Media.io doctor" "mediaio doctor" "" "local Media.io checks passed"
 
 if [ "$claude_available" -eq 1 ]; then
-  invoke_checked_step "Add Media.io marketplace (Claude)" "claude plugin marketplace add media-io/plugin" "" "marketplace is registered"
+  invoke_checked_step "Add Media.io marketplace (Claude)" "claude plugin marketplace add '$MediaIoMarketplaceSource'" "" "marketplace is registered"
   invoke_checked_step "Refresh Media.io marketplace (Claude)" "claude plugin marketplace update media-io" "" "marketplace is refreshed"
-  invoke_checked_step "Install Claude Code plugin" "claude plugin install media-io@media-io -s user -y && claude_plugin_installed=1" "" "Claude Code plugin install completed"
+  invoke_checked_step "Install Claude Code plugin" "claude plugin install '$MediaIoClaudePluginId' -s user -y && claude_plugin_installed=1" "" "Claude Code plugin install completed"
   invoke_checked_step "Verify Claude Code plugin install" "if test_claude_plugin_provided_skills_present; then claude_plugin_ready=1; else add_warning 'Claude Code plugin-provided skills are missing; direct skills install will be attempted with npx.'; fi" "" "Claude Code plugin install verification completed"
 fi
 
 if [ "$codex_available" -eq 1 ]; then
-  if ! invoke_soft_step "Add Media.io marketplace (Codex)" "codex plugin marketplace add media-io/plugin" "Codex marketplace is registered"; then
+  if ! invoke_soft_step "Add Media.io marketplace (Codex)" "codex plugin marketplace add '$MediaIoMarketplaceSource'" "Codex marketplace is registered"; then
     use_personal_marketplace_fallback=1
   fi
-  if [ "$use_personal_marketplace_fallback" -eq 0 ] && ! invoke_soft_step "Refresh Media.io marketplace (Codex)" "codex plugin marketplace upgrade media-io" "Codex marketplace is refreshed"; then
+  if [ "$use_personal_marketplace_fallback" -eq 0 ] && ! invoke_soft_step "Refresh Media.io marketplace (Codex)" "codex plugin marketplace upgrade '$MediaIoCodexMarketplaceName'" "Codex marketplace is refreshed"; then
     use_personal_marketplace_fallback=1
   fi
   invoke_checked_step "Install Codex plugin" '
-    if [ "$use_personal_marketplace_fallback" -eq 0 ] && codex plugin add media-io@media-io; then
-      resolved_codex_marketplace_name=media-io
+    if [ "$use_personal_marketplace_fallback" -eq 0 ] && codex plugin add "$MediaIoCodexPluginName@$MediaIoCodexMarketplaceName"; then
+      resolved_codex_marketplace_name=$MediaIoCodexMarketplaceName
     else
       add_warning "The git marketplace install failed. Switching to the personal marketplace fallback."
       installed_marketplace_name=$(initialize_personal_marketplace_fallback)
-      codex plugin add "media-io@$installed_marketplace_name" || return 1
+      codex plugin add "$MediaIoCodexPluginName@$installed_marketplace_name" || return 1
       resolved_codex_marketplace_name=$installed_marketplace_name
     fi
     codex_plugin_installed=1
@@ -719,7 +758,7 @@ if [ -z "$(get_skill_target_agent_args 2>/dev/null || true)" ]; then
   write_step "Skip direct Media.io skills install"
   printf '  OK: plugin-provided skills are installed; direct skills install is skipped to avoid duplicate entries\n'
 else
-  invoke_checked_step "Install Media.io skills" "install_skill_files" "" "skills are installed"
+  invoke_checked_step "Install Media.io skills" "install_skill_files" "test_skill_directories_present" "skills are installed"
 fi
 
 write_step "Final verification"
@@ -736,7 +775,9 @@ if [ "$claude_plugin_installed" -eq 1 ] || [ "$codex_plugin_installed" -eq 1 ]; 
     fi
   fi
 else
-  if ! test_skill_directories_present; then
+  if [ -z "$(get_skill_target_bases || true)" ]; then
+    add_warning "Neither Codex nor Claude Code is available; no Media.io skills target was verified."
+  elif ! test_skill_directories_present; then
     add_failure "Final verification - Media.io skill directories are still missing."
   fi
 fi

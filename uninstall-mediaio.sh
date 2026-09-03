@@ -10,7 +10,10 @@ warning_count=0
 failures=
 warnings=
 SCRIPT_VERSION="0.1.5"
+MediaIoPackageName=${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}
 MediaIoInstallDir=${MEDIAIO_INSTALL_DIR:-"$HOME/.local/bin"}
+MediaIoClaudePluginId=${MEDIAIO_CLAUDE_PLUGIN_ID:-media-io@media-io}
+MediaIoCodexPluginName=${MEDIAIO_CODEX_PLUGIN_NAME:-media-io}
 MediaIoCodexMarketplaceName=${MEDIAIO_CODEX_MARKETPLACE_NAME:-media-io}
 claude_available=0
 codex_available=0
@@ -88,7 +91,7 @@ get_default_mediaio_skill_names() {
 }
 
 get_mediaio_plugin_source_root() {
-  for candidate in "$SCRIPT_ROOT/../media-plugin-main" "$SCRIPT_ROOT/../plugins/media-io" "$HOME/.codex/.tmp/marketplaces/media-io"; do
+  for candidate in "$SCRIPT_ROOT" "$SCRIPT_ROOT/../media-plugin-main" "$SCRIPT_ROOT/../plugins/media-io" "$HOME/.codex/.tmp/marketplaces/$MediaIoCodexMarketplaceName"; do
     if [ -f "$candidate/.codex-plugin/plugin.json" ]; then
       printf '%s\n' "$candidate"
       return 0
@@ -98,12 +101,12 @@ get_mediaio_plugin_source_root() {
 }
 
 get_mediaio_skill_source_root() {
-  if [ -n "${MEDIAIO_SKILL_SOURCE:-}" ] && [ -d "$MEDIAIO_SKILL_SOURCE/skills" ]; then
+  if [ -n "${MEDIAIO_SKILL_SOURCE:-}" ] && [ -d "$MEDIAIO_SKILL_SOURCE" ]; then
     printf '%s\n' "$MEDIAIO_SKILL_SOURCE"
     return 0
   fi
-  for candidate in "$SCRIPT_ROOT" "$SCRIPT_ROOT/../media-plugin-main" "$SCRIPT_ROOT/../plugins/media-io"; do
-    if [ -d "$candidate/skills" ]; then
+  for candidate in "$SCRIPT_ROOT/skills" "$SCRIPT_ROOT/../media-plugin-main/skills" "$SCRIPT_ROOT/../plugins/media-io/skills"; do
+    if [ -d "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0
     fi
@@ -113,11 +116,11 @@ get_mediaio_skill_source_root() {
 
 get_mediaio_skill_names() {
   source_root=$(get_mediaio_skill_source_root 2>/dev/null || true)
-  if [ -z "$source_root" ] || [ ! -d "$source_root/skills" ]; then
+  if [ -z "$source_root" ] || [ ! -d "$source_root" ]; then
     get_default_mediaio_skill_names
     return 0
   fi
-  skill_names=$(find "$source_root/skills" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | while IFS= read -r skill_dir; do
+  skill_names=$(find "$source_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | while IFS= read -r skill_dir; do
     [ -n "$skill_dir" ] || continue
     [ -f "$skill_dir/SKILL.md" ] && basename "$skill_dir"
   done)
@@ -184,13 +187,16 @@ remove_personal_marketplace_entry() {
   marketplace_path=$(get_personal_marketplace_path)
   [ -f "$marketplace_path" ] || return 1
 
-  payload=$(node -e 'const fs=require("fs"); process.stdout.write(fs.readFileSync(process.argv[1],"utf8"));' "$marketplace_path")
+  payload=$(node -e 'const fs=require("fs"); const raw=fs.readFileSync(process.argv[1],"utf8"); JSON.parse(raw); process.stdout.write(raw);' "$marketplace_path") || {
+    add_warning "Personal marketplace file exists but could not be parsed cleanly; skipping marketplace entry removal."
+    return 1
+  }
   updated=$(node -e '
     try {
       const payload = JSON.parse(process.argv[1]);
       if (!Array.isArray(payload.plugins)) process.exit(2);
       const before = payload.plugins.length;
-      payload.plugins = payload.plugins.filter((entry) => entry && entry.name !== "media-io");
+      payload.plugins = payload.plugins.filter((entry) => entry && entry.name !== process.argv[2]);
       if (payload.plugins.length === before) process.exit(3);
       payload.interface = payload.interface || {};
       if (!String(payload.name || "").trim()) payload.name = "personal";
@@ -199,7 +205,7 @@ remove_personal_marketplace_entry() {
     } catch {
       process.exit(4);
     }
-  ' "$payload") || return 1
+  ' "$payload" "$MediaIoCodexPluginName") || return 1
 
   write_json_no_bom "$marketplace_path" "$updated"
 }
@@ -208,14 +214,14 @@ get_codex_plugin_cache_roots() {
   version=$(get_mediaio_plugin_version 2>/dev/null || true)
   marketplace=$(get_personal_marketplace_name)
   for cache_root in \
-    "$HOME/.codex/plugins/cache/$marketplace/media-io/$version" \
-    "$HOME/.codex/plugins/cache/$marketplace/media-io" \
-    "$HOME/.codex/plugins/cache/$MediaIoCodexMarketplaceName/media-io/$version" \
-    "$HOME/.codex/plugins/cache/$MediaIoCodexMarketplaceName/media-io" \
-    "$HOME/.codex/plugins/cache/media-io/media-io/$version" \
-    "$HOME/.codex/plugins/cache/media-io/media-io" \
-    "$HOME/.codex/plugins/cache/personal/media-io/$version" \
-    "$HOME/.codex/plugins/cache/personal/media-io"
+    "$HOME/.codex/plugins/cache/$marketplace/$MediaIoCodexPluginName/$version" \
+    "$HOME/.codex/plugins/cache/$marketplace/$MediaIoCodexPluginName" \
+    "$HOME/.codex/plugins/cache/$MediaIoCodexMarketplaceName/$MediaIoCodexPluginName/$version" \
+    "$HOME/.codex/plugins/cache/$MediaIoCodexMarketplaceName/$MediaIoCodexPluginName" \
+    "$HOME/.codex/plugins/cache/media-io/$MediaIoCodexPluginName/$version" \
+    "$HOME/.codex/plugins/cache/media-io/$MediaIoCodexPluginName" \
+    "$HOME/.codex/plugins/cache/personal/$MediaIoCodexPluginName/$version" \
+    "$HOME/.codex/plugins/cache/personal/$MediaIoCodexPluginName"
   do
     [ -n "$cache_root" ] && printf '%s\n' "$cache_root"
   done
@@ -223,8 +229,7 @@ get_codex_plugin_cache_roots() {
   if [ -d "$HOME/.codex/plugins/cache" ]; then
     find "$HOME/.codex/plugins/cache" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while IFS= read -r dir; do
       [ -n "$dir" ] || continue
-      printf '%s\n' "$dir/$MediaIoCodexMarketplaceName/media-io"
-      printf '%s\n' "$dir/media-io"
+      printf '%s\n' "$dir/$MediaIoCodexPluginName"
     done
   fi
 }
@@ -249,14 +254,54 @@ get_claude_plugin_cache_roots() {
   fi
 }
 
+get_codex_plugin_cache_namespace_roots() {
+  printf '%s\n' "$HOME/.codex/plugins/cache/$MediaIoCodexMarketplaceName"
+  printf '%s\n' "$HOME/.codex/plugins/cache/media-io"
+  printf '%s\n' "$HOME/.codex/plugins/cache/personal"
+}
+
+get_claude_plugin_cache_namespace_roots() {
+  printf '%s\n' "$HOME/.claude/plugins/cache/media-io"
+}
+
+remove_empty_directory_if_present() {
+  path=$1
+  [ -d "$path" ] || return 1
+  if [ -z "$(find "$path" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+    rmdir "$path"
+    printf '  OK: removed empty directory %s\n' "$path"
+    return 0
+  fi
+  return 1
+}
+
 remove_codex_plugin_caches() {
   get_codex_plugin_cache_roots | while IFS= read -r cache_root; do
     [ -n "$cache_root" ] || continue
     remove_path_if_present "$cache_root" >/dev/null || true
   done
+  get_codex_plugin_cache_namespace_roots | while IFS= read -r namespace_root; do
+    [ -n "$namespace_root" ] || continue
+    remove_empty_directory_if_present "$namespace_root" >/dev/null || true
+  done
 }
 
 remove_codex_marketplaces() {
+  if require_command codex; then
+    for marketplace in "$MediaIoCodexMarketplaceName" media-io; do
+      [ -n "$marketplace" ] || continue
+      raw=$(codex plugin marketplace remove "$marketplace" 2>&1) && {
+        printf '  OK: codex plugin marketplace remove %s\n' "$marketplace"
+      } || {
+        case "$raw" in
+          *'not configured or installed'*) add_warning "codex marketplace $marketplace was already absent." ;;
+          *) add_warning "codex plugin marketplace remove $marketplace failed: $raw" ;;
+        esac
+      }
+    done
+  else
+    add_warning "codex is not available; removing Codex marketplace snapshots directly."
+  fi
   get_codex_marketplace_roots | while IFS= read -r marketplace_root; do
     [ -n "$marketplace_root" ] || continue
     remove_path_if_present "$marketplace_root" >/dev/null || true
@@ -267,6 +312,10 @@ remove_claude_plugin_caches() {
   get_claude_plugin_cache_roots | while IFS= read -r cache_root; do
     [ -n "$cache_root" ] || continue
     remove_path_if_present "$cache_root" >/dev/null || true
+  done
+  get_claude_plugin_cache_namespace_roots | while IFS= read -r namespace_root; do
+    [ -n "$namespace_root" ] || continue
+    remove_empty_directory_if_present "$namespace_root" >/dev/null || true
   done
 }
 
@@ -299,28 +348,52 @@ test_skill_directories_absent() {
 }
 
 test_codex_plugin_cache_present() {
-  get_codex_plugin_cache_roots | {
+  if get_codex_plugin_cache_roots | {
     while IFS= read -r cache_root; do
       [ -n "$cache_root" ] || continue
       [ -d "$cache_root" ] && exit 0
     done
     exit 1
-  }
+  }; then
+    return 0
+  fi
+  if get_codex_plugin_cache_namespace_roots | {
+    while IFS= read -r namespace_root; do
+      [ -n "$namespace_root" ] || continue
+      [ -d "$namespace_root" ] && exit 0
+    done
+    exit 1
+  }; then
+    return 0
+  fi
+  return 1
 }
 
 test_claude_plugin_cache_present() {
-  get_claude_plugin_cache_roots | {
+  if get_claude_plugin_cache_roots | {
     while IFS= read -r cache_root; do
       [ -n "$cache_root" ] || continue
       [ -d "$cache_root" ] && exit 0
     done
     exit 1
-  }
+  }; then
+    return 0
+  fi
+  if get_claude_plugin_cache_namespace_roots | {
+    while IFS= read -r namespace_root; do
+      [ -n "$namespace_root" ] || continue
+      [ -d "$namespace_root" ] && exit 0
+    done
+    exit 1
+  }; then
+    return 0
+  fi
+  return 1
 }
 
 verify_mediaio_package_removed() {
   if require_command npm; then
-    package_dir=$(npm root -g)/@mediaio/cli
+    package_dir=$(npm root -g)/$MediaIoPackageName
     [ ! -e "$package_dir" ]
   else
     return 0
@@ -343,7 +416,13 @@ warn_if_mediaio_still_on_path() {
 
 remove_mediaio_cli() {
   if require_command npm; then
-    npm uninstall -g @mediaio/cli || true
+    raw=$(npm uninstall -g "$MediaIoPackageName" 2>&1) && {
+      printf '  OK: npm uninstall -g %s\n' "$MediaIoPackageName"
+    } || {
+      add_warning "npm uninstall -g $MediaIoPackageName failed: $raw"
+    }
+  else
+    add_warning "npm is not available; skipping npm global package removal."
   fi
   for release_bin in "$MediaIoInstallDir/mediaio" "$MediaIoInstallDir/mediaio.exe"; do
     if [ -e "$release_bin" ]; then
@@ -351,6 +430,29 @@ remove_mediaio_cli() {
       printf '  OK: removed %s\n' "$release_bin"
     fi
   done
+}
+
+invoke_mediaio_skill_remove() {
+  if require_command npx; then
+    skill_args=
+    for skill_name in $(get_mediaio_skill_names); do
+      [ -n "$skill_name" ] || continue
+      skill_args="$skill_args $skill_name"
+    done
+    if [ -n "$skill_args" ]; then
+      raw=$(npx --yes skills remove $skill_args -g -a codex -a claude-code -y 2>&1) && {
+        printf '  OK: npx skills remove%s\n' "$skill_args"
+      } || {
+        add_warning "npx skills remove failed; falling back to direct directory removal. $raw"
+      }
+    else
+      add_warning "No Media.io skill names were found; falling back to direct directory removal."
+    fi
+  else
+    add_warning "npx is not available; removing Media.io skill directories directly."
+  fi
+
+  remove_skill_directories
 }
 
 remove_claude_plugin() {
@@ -362,13 +464,13 @@ remove_claude_plugin() {
   fi
 
   if require_command claude; then
-    raw=$(claude plugin uninstall media-io@media-io -s user -y 2>&1) && {
+    raw=$(claude plugin uninstall "$MediaIoClaudePluginId" -s user -y 2>&1) && {
       removed=1
-      printf '  OK: claude plugin uninstall media-io@media-io -s user -y\n'
+      printf '  OK: claude plugin uninstall %s -s user -y\n' "$MediaIoClaudePluginId"
     } || {
       case "$raw" in
-        *'Plugin "media-io@media-io" not found in installed plugins'*) printf '  OK: Claude Code plugin already absent\n' ;;
-        *) add_warning "claude plugin uninstall media-io@media-io failed: $raw" ;;
+        *'not found in installed plugins'*) printf '  OK: Claude Code plugin already absent\n' ;;
+        *) add_warning "claude plugin uninstall $MediaIoClaudePluginId failed: $raw" ;;
       esac
     }
   else
@@ -388,7 +490,7 @@ remove_codex_plugin() {
   fi
 
   if require_command codex; then
-    for target in "media-io@$marketplace_name" "media-io@media-io"; do
+    for target in "$MediaIoCodexPluginName@$marketplace_name" "$MediaIoCodexPluginName@$MediaIoCodexMarketplaceName" "$MediaIoCodexPluginName@personal"; do
       raw=$(codex plugin remove "$target" 2>&1) && {
         removed=1
         printf '  OK: codex plugin remove %s\n' "$target"
@@ -405,7 +507,7 @@ remove_codex_plugin() {
   fi
 
   if remove_personal_marketplace_entry; then
-    printf '  OK: removed media-io from personal marketplace file\n'
+    printf '  OK: removed %s from personal marketplace file\n' "$MediaIoCodexPluginName"
   elif [ -f "$(get_personal_marketplace_path)" ]; then
     add_warning "No media-io entry was found in the personal marketplace file."
   else
@@ -414,6 +516,7 @@ remove_codex_plugin() {
 
   remove_codex_plugin_caches
   remove_codex_marketplaces
+  remove_path_if_present "$HOME/plugins/media-io" >/dev/null || true
   [ "$removed" -eq 0 ] || return 0
 }
 
@@ -492,9 +595,6 @@ printf '%s\n' "This script removes the Media.io CLI, Claude/Codex plugin state, 
 
 check_optional_host "Preflight: locate claude" claude claude_available
 check_optional_host "Preflight: locate codex" codex codex_available
-run_checked_step "Preflight: locate npm" "require_command npm" "" "npm is available"
-run_checked_step "Preflight: locate npx" "require_command npx" "" "npx is available"
-
 run_checked_step "Uninstall Media.io CLI" "remove_mediaio_cli" "verify_mediaio_package_removed" "Media.io CLI removed"
 warn_if_mediaio_still_on_path
 
@@ -512,7 +612,7 @@ else
   remove_codex_plugin
 fi
 
-run_checked_step "Remove Media.io skills" "remove_skill_directories" "test_skill_directories_absent" "Media.io skills removed"
+run_checked_step "Remove Media.io skills" "invoke_mediaio_skill_remove" "test_skill_directories_absent" "Media.io skills removed"
 
 write_step "Final verification"
 verify_final_state
