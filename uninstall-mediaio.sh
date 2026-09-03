@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# uninstall-mediaio.sh script version: 0.1.0
+# uninstall-mediaio.sh script version: 0.1.2
 set -euo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,7 +7,7 @@ SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 step_index=0
 failures=()
 warnings=()
-SCRIPT_VERSION="0.1.0"
+SCRIPT_VERSION="0.1.2"
 MediaIoInstallDir="${MEDIAIO_INSTALL_DIR:-$HOME/.local/bin}"
 MediaIoCodexMarketplaceName="${MEDIAIO_CODEX_MARKETPLACE_NAME:-media-io}"
 claude_available=0
@@ -123,17 +123,28 @@ get_mediaio_skill_source_root() {
   get_mediaio_skill_source_candidates
 }
 
+get_default_mediaio_skill_names() {
+  printf '%s\n' mediaio-generate mediaio-install
+}
+
 get_mediaio_skill_names() {
-  local source_root skill_dir
-  source_root="$(get_mediaio_skill_source_root)"
-  [[ -d "$source_root/skills" ]] || return 1
+  local source_root skill_dir found=0
+  if ! source_root="$(get_mediaio_skill_source_root)" || ! [[ -d "$source_root/skills" ]]; then
+    get_default_mediaio_skill_names
+    return 0
+  fi
 
   while IFS= read -r skill_dir; do
     [[ -n "$skill_dir" ]] || continue
     if [[ -f "$skill_dir/SKILL.md" ]]; then
       basename "$skill_dir"
+      found=1
     fi
   done < <(find "$source_root/skills" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+
+  if [[ "$found" -eq 0 ]]; then
+    get_default_mediaio_skill_names
+  fi
 }
 
 get_mediaio_plugin_version() {

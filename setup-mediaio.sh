@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-mediaio.sh script version: 0.1.0
+# setup-mediaio.sh script version: 0.1.2
 set -euo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,7 +7,7 @@ SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 step_index=0
 failures=()
 warnings=()
-SCRIPT_VERSION="0.1.0"
+SCRIPT_VERSION="0.1.2"
 MediaIoPackageName="${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}"
 MediaIoInstallDir="${MEDIAIO_INSTALL_DIR:-$HOME/.local/bin}"
 MediaIoNpmRegistry="${MEDIAIO_NPM_REGISTRY:-https://registry.npmjs.org}"
@@ -499,6 +499,15 @@ get_local_mediaio_plugin_root() {
 }
 
 get_skill_target_bases() {
+  if [[ "$codex_available" -eq 1 && "$codex_plugin_installed" -eq 0 ]]; then
+    printf '%s\n' "$HOME/.codex/skills"
+  fi
+  if [[ "$claude_available" -eq 1 && "$claude_plugin_installed" -eq 0 ]]; then
+    printf '%s\n' "$HOME/.claude/skills"
+  fi
+}
+
+get_all_skill_target_bases() {
   if [[ "$codex_available" -eq 1 ]]; then
     printf '%s\n' "$HOME/.codex/skills"
   fi
@@ -509,10 +518,10 @@ get_skill_target_bases() {
 
 get_skill_target_agent_args() {
   local agents=()
-  if [[ "$codex_available" -eq 1 ]]; then
+  if [[ "$codex_available" -eq 1 && "$codex_plugin_installed" -eq 0 ]]; then
     agents+=("-a codex")
   fi
-  if [[ "$claude_available" -eq 1 ]]; then
+  if [[ "$claude_available" -eq 1 && "$claude_plugin_installed" -eq 0 ]]; then
     agents+=("-a claude-code")
   fi
 
@@ -536,7 +545,9 @@ get_mediaio_skill_source_candidates() {
 
   local candidate
   for candidate in "${candidates[@]}"; do
-    if [[ -f "$candidate/skills/mediaio-generate/SKILL.md" ]] && [[ -f "$candidate/skills/mediaio-install/SKILL.md" ]]; then
+    if get_default_mediaio_skill_names | while IFS= read -r skill_name; do
+      [[ -f "$candidate/skills/$skill_name/SKILL.md" ]] || exit 1
+    done; then
       printf '%s\n' "$candidate"
       return 0
     fi
@@ -549,17 +560,28 @@ get_mediaio_skill_source_root() {
   get_mediaio_skill_source_candidates
 }
 
+get_default_mediaio_skill_names() {
+  printf '%s\n' mediaio-generate mediaio-install
+}
+
 get_mediaio_skill_names() {
-  local source_root skill_dir
-  source_root="$(get_mediaio_skill_source_root)"
-  [[ -d "$source_root/skills" ]] || return 1
+  local source_root skill_dir found=0
+  if ! source_root="$(get_mediaio_skill_source_root)" || ! [[ -d "$source_root/skills" ]]; then
+    get_default_mediaio_skill_names
+    return 0
+  fi
 
   while IFS= read -r skill_dir; do
     [[ -n "$skill_dir" ]] || continue
     if [[ -f "$skill_dir/SKILL.md" ]]; then
       basename "$skill_dir"
+      found=1
     fi
   done < <(find "$source_root/skills" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+
+  if [[ "$found" -eq 0 ]]; then
+    get_default_mediaio_skill_names
+  fi
 }
 
 get_personal_marketplace_path() {
@@ -726,37 +748,14 @@ get_claude_plugin_cache_root() {
   printf '%s\n' "$HOME/.claude/plugins/cache/media-io/media-io/$version"
 }
 
-install_skill_files_from_local_source() {
-  local source_root target_base skill_name skill_count=0
-  source_root="$(get_mediaio_skill_source_root)"
-  [[ -d "$source_root/skills" ]] || return 1
-
-  while IFS= read -r target_base; do
-    [[ -n "$target_base" ]] || continue
-    mkdir -p "$target_base"
-    while IFS= read -r skill_name; do
-      [[ -n "$skill_name" ]] || continue
-      skill_count=$((skill_count + 1))
-      rm -rf "$target_base/$skill_name"
-      cp -R "$source_root/skills/$skill_name" "$target_base/"
-    done < <(get_mediaio_skill_names)
-  done < <(get_skill_target_bases)
-
-  [[ $skill_count -gt 0 ]]
-}
-
 install_skill_files_from_npx() {
   local agent_args
   agent_args="$(get_skill_target_agent_args)" || return 1
-  printf '  Using npx fallback to install Media.io skills\n'
+  printf '  Installing Media.io skills with npx\n'
   npx --yes skills add media-io/plugin -g $agent_args --skill '*' -y
 }
 
 install_skill_files() {
-  if install_skill_files_from_local_source; then
-    return 0
-  fi
-
   install_skill_files_from_npx
 }
 
@@ -821,6 +820,26 @@ test_skill_directories_present() {
   [[ $skill_count -gt 0 ]]
 }
 
+test_any_direct_skill_directories_present() {
+  local skill_root skill_name
+  while IFS= read -r skill_root; do
+    [[ -n "$skill_root" ]] || continue
+    if [[ -d "$skill_root" ]]; then
+      return 0
+    fi
+  done < <(
+    get_all_skill_target_bases | while IFS= read -r base; do
+      [[ -n "$base" ]] || continue
+      get_mediaio_skill_names | while IFS= read -r skill_name; do
+        [[ -n "$skill_name" ]] || continue
+        printf '%s\n' "$base/$skill_name"
+      done
+    done
+  )
+
+  return 1
+}
+
 test_claude_plugin_cache_present() {
   [[ -d "$(get_claude_plugin_cache_root)" ]]
 }
@@ -862,7 +881,7 @@ ensure_mediaio_auth() {
 
 printf '%s\n' "Media.io setup script"
 printf 'Script version: %s\n' "$SCRIPT_VERSION"
-printf '%s\n' "This script installs the Media.io plugin, CLI, and skills. The CLI prefers npm and falls back to a release archive; skills prefer direct package/local installers and fall back to npm/npx only when needed."
+printf '%s\n' "This script installs the Media.io plugin, CLI, and skills. The CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable."
 
 check_optional_host "Preflight: locate claude" claude claude_available
 check_optional_host "Preflight: locate codex" codex codex_available
@@ -993,7 +1012,7 @@ if [[ "$codex_available" -eq 1 ]]; then
   ' "" "Codex plugin cache is present"
 fi
 
-if [[ "$claude_plugin_ready" -eq 1 || "$codex_plugin_ready" -eq 1 ]]; then
+if [[ -z "$(get_skill_target_agent_args || true)" ]]; then
   write_step "Skip direct Media.io skills install"
   printf '  OK: plugin-provided skills are installed; direct skills install is skipped to avoid duplicate entries\n'
 else
@@ -1015,7 +1034,7 @@ if [[ "$claude_plugin_installed" -eq 1 || "$codex_plugin_installed" -eq 1 ]]; th
     add_failure "Final verification - Codex plugin cache is still missing."
   fi
   if [[ "$claude_plugin_ready" -eq 1 || "$codex_plugin_ready" -eq 1 ]]; then
-    if test_skill_directories_present; then
+    if test_any_direct_skill_directories_present; then
       add_warning "Residual direct Media.io skill directories still exist alongside the plugin install."
     fi
   fi
