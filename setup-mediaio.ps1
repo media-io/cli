@@ -1,5 +1,5 @@
 # Media.io setup script for Windows.
-# setup-mediaio.ps1 script version: 0.1.3
+# setup-mediaio.ps1 script version: 0.1.4
 # Installs the Media.io plugin, CLI, and skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
@@ -25,7 +25,7 @@ $ErrorActionPreference = "Stop"
 $script:StepIndex = 0
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
-$script:ScriptVersion = "0.1.3"
+$script:ScriptVersion = "0.1.4"
 $script:ResolvedClaudeMarketplaceName = $null
 $script:UseCodexPersonalMarketplaceFallback = $false
 $script:CodexPersonalMarketplaceFallbackReason = $null
@@ -764,12 +764,65 @@ function Get-MediaIoSkillNames {
   return @(Get-DefaultMediaIoSkillNames)
 }
 
+function Test-MediaIoSkillSetInBase {
+  param([Parameter(Mandatory = $true)][string]$BaseDir)
+
+  foreach ($skillName in @(Get-MediaIoSkillNames)) {
+    if (-not (Test-Path (Join-Path $BaseDir "$skillName\SKILL.md"))) {
+      return $false
+    }
+  }
+  return $true
+}
+
+function Test-ClaudePluginProvidedSkillsPresent {
+  $namespaceRoot = Join-Path $HOME ".claude\plugins\cache\media-io\media-io"
+  if (-not (Test-Path $namespaceRoot)) { return $false }
+
+  $candidateRoots = @($namespaceRoot)
+  $candidateRoots += @(
+    Get-ChildItem -LiteralPath $namespaceRoot -Directory -ErrorAction SilentlyContinue |
+      Sort-Object -Property LastWriteTime -Descending |
+      ForEach-Object { $_.FullName }
+  )
+
+  foreach ($root in @($candidateRoots | Select-Object -Unique)) {
+    if (Test-MediaIoSkillSetInBase -BaseDir (Join-Path $root "skills")) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
+function Test-CodexPluginProvidedSkillsPresent {
+  param([Parameter(Mandatory = $true)][string]$MarketplaceName)
+
+  $namespaceRoot = Join-Path $HOME ".codex\plugins\cache\$MarketplaceName\$MediaIoCodexPluginName"
+  if (-not (Test-Path $namespaceRoot)) { return $false }
+
+  $candidateRoots = @($namespaceRoot)
+  $candidateRoots += @(
+    Get-ChildItem -LiteralPath $namespaceRoot -Directory -ErrorAction SilentlyContinue |
+      Sort-Object -Property LastWriteTime -Descending |
+      ForEach-Object { $_.FullName }
+  )
+
+  foreach ($root in @($candidateRoots | Select-Object -Unique)) {
+    if (Test-MediaIoSkillSetInBase -BaseDir (Join-Path $root "skills")) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
 function Get-MediaIoSkillTargetBases {
   $targets = @()
-  if ($script:CodexAvailable -and -not $script:CodexPluginInstalled) {
+  if ($script:CodexAvailable -and -not $script:CodexPluginReady) {
     $targets += [pscustomobject]@{ Agent = "codex"; BaseDir = (Join-Path $HOME ".codex\skills") }
   }
-  if ($script:ClaudeAvailable -and -not $script:ClaudePluginInstalled) {
+  if ($script:ClaudeAvailable -and -not $script:ClaudePluginReady) {
     $targets += [pscustomobject]@{ Agent = "claude-code"; BaseDir = (Join-Path $HOME ".claude\skills") }
   }
   return @($targets)
@@ -830,11 +883,11 @@ function Invoke-MediaIoSkillInstall {
 function Test-MediaIoPluginInstalled {
   $installed = $false
 
-  if ($script:ClaudePluginInstalled) {
+  if ($script:ClaudePluginReady) {
     $installed = $true
   }
 
-  if ($script:CodexPluginInstalled) {
+  if ($script:CodexPluginReady) {
     $installed = $true
   }
 
@@ -1206,7 +1259,13 @@ if ($script:ClaudeAvailable) {
       Add-Warning "Claude Code does not currently list $MediaIoClaudePluginId in the installed plugin list."
     } else {
       Write-Host "  OK: Claude Code lists $MediaIoClaudePluginId as installed" -ForegroundColor Green
+    }
+
+    if (Test-ClaudePluginProvidedSkillsPresent) {
+      Write-Host "  OK: Claude Code plugin-provided skills are present" -ForegroundColor Green
       $script:ClaudePluginReady = $true
+    } else {
+      Add-Warning "Claude Code plugin-provided skills are missing; direct skills install will be attempted with npx."
     }
   } -SuccessMessage "Claude Code plugin install verification completed"
 }
@@ -1298,12 +1357,18 @@ if ($script:CodexAvailable) {
         Add-Warning "Codex does not currently list $expectedId in the installed plugin list."
       } else {
         Write-Host "  OK: Codex lists $expectedId as installed" -ForegroundColor Green
-        $script:CodexPluginReady = $true
       }
       $global:LASTEXITCODE = 0
     } catch {
       Add-Warning "Codex installed plugin list could not be read: $($_.Exception.Message)"
       $global:LASTEXITCODE = 0
+    }
+
+    if (Test-CodexPluginProvidedSkillsPresent -MarketplaceName $script:ResolvedCodexMarketplaceName) {
+      Write-Host "  OK: Codex plugin-provided skills are present" -ForegroundColor Green
+      $script:CodexPluginReady = $true
+    } else {
+      Add-Warning "Codex plugin-provided skills are missing; direct skills install will be attempted with npx."
     }
   } -SuccessMessage "Codex plugin install verification completed"
 }

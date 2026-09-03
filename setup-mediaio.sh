@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-mediaio.sh script version: 0.1.3
+# setup-mediaio.sh script version: 0.1.4
 set -euo pipefail
 
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,7 +7,7 @@ SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 step_index=0
 failures=()
 warnings=()
-SCRIPT_VERSION="0.1.3"
+SCRIPT_VERSION="0.1.4"
 MediaIoPackageName="${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}"
 MediaIoInstallDir="${MEDIAIO_INSTALL_DIR:-$HOME/.local/bin}"
 MediaIoNpmRegistry="${MEDIAIO_NPM_REGISTRY:-https://registry.npmjs.org}"
@@ -486,10 +486,10 @@ get_local_mediaio_plugin_root() {
 }
 
 get_skill_target_bases() {
-  if [[ "$codex_available" -eq 1 && "$codex_plugin_installed" -eq 0 ]]; then
+  if [[ "$codex_available" -eq 1 && "$codex_plugin_ready" -eq 0 ]]; then
     printf '%s\n' "$HOME/.codex/skills"
   fi
-  if [[ "$claude_available" -eq 1 && "$claude_plugin_installed" -eq 0 ]]; then
+  if [[ "$claude_available" -eq 1 && "$claude_plugin_ready" -eq 0 ]]; then
     printf '%s\n' "$HOME/.claude/skills"
   fi
 }
@@ -505,10 +505,10 @@ get_all_skill_target_bases() {
 
 get_skill_target_agent_args() {
   local agents=()
-  if [[ "$codex_available" -eq 1 && "$codex_plugin_installed" -eq 0 ]]; then
+  if [[ "$codex_available" -eq 1 && "$codex_plugin_ready" -eq 0 ]]; then
     agents+=("-a codex")
   fi
-  if [[ "$claude_available" -eq 1 && "$claude_plugin_installed" -eq 0 ]]; then
+  if [[ "$claude_available" -eq 1 && "$claude_plugin_ready" -eq 0 ]]; then
     agents+=("-a claude-code")
   fi
 
@@ -569,6 +569,56 @@ get_mediaio_skill_names() {
   if [[ "$found" -eq 0 ]]; then
     get_default_mediaio_skill_names
   fi
+}
+
+test_mediaio_skill_set_in_base() {
+  local base="$1" skill_name skill_count=0
+  while IFS= read -r skill_name; do
+    [[ -n "$skill_name" ]] || continue
+    skill_count=$((skill_count + 1))
+    [[ -f "$base/$skill_name/SKILL.md" ]] || return 1
+  done < <(get_mediaio_skill_names)
+
+  [[ $skill_count -gt 0 ]]
+}
+
+test_claude_plugin_provided_skills_present() {
+  local namespace_root="$HOME/.claude/plugins/cache/media-io/media-io"
+  [[ -d "$namespace_root" ]] || return 1
+
+  if test_mediaio_skill_set_in_base "$namespace_root/skills"; then
+    return 0
+  fi
+
+  local root
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    if test_mediaio_skill_set_in_base "$root/skills"; then
+      return 0
+    fi
+  done < <(find "$namespace_root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort -r)
+
+  return 1
+}
+
+test_codex_plugin_provided_skills_present() {
+  local marketplace_name="$1"
+  local namespace_root="$HOME/.codex/plugins/cache/$marketplace_name/media-io"
+  [[ -d "$namespace_root" ]] || return 1
+
+  if test_mediaio_skill_set_in_base "$namespace_root/skills"; then
+    return 0
+  fi
+
+  local root
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    if test_mediaio_skill_set_in_base "$root/skills"; then
+      return 0
+    fi
+  done < <(find "$namespace_root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort -r)
+
+  return 1
 }
 
 get_personal_marketplace_path() {
@@ -875,8 +925,13 @@ if [[ "$claude_available" -eq 1 ]]; then
         add_warning "Claude Code does not currently list media-io@media-io in the installed plugin list."
       else
         printf '"'"'  OK: Claude Code lists media-io@media-io as installed\n'"'"'
-        claude_plugin_ready=1
       fi
+    fi
+    if test_claude_plugin_provided_skills_present; then
+      printf '"'"'  OK: Claude Code plugin-provided skills are present\n'"'"'
+      claude_plugin_ready=1
+    else
+      add_warning "Claude Code plugin-provided skills are missing; direct skills install will be attempted with npx."
     fi
   ' "" "Claude Code plugin install verification completed"
 fi
@@ -950,7 +1005,12 @@ if [[ "$codex_available" -eq 1 ]]; then
       add_warning "Codex does not currently list $expected_id in the installed plugin list."
     else
       printf '"'"'  OK: Codex lists %s as installed\n'"'"' "$expected_id"
+    fi
+    if test_codex_plugin_provided_skills_present "$resolved_codex_marketplace_name"; then
+      printf '"'"'  OK: Codex plugin-provided skills are present\n'"'"'
       codex_plugin_ready=1
+    else
+      add_warning "Codex plugin-provided skills are missing; direct skills install will be attempted with npx."
     fi
   ' "" "Codex plugin install verification completed"
 fi
