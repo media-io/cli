@@ -1,4 +1,5 @@
 [CmdletBinding()]
+# uninstall-mediaio.ps1 script version: 0.1.0
 param()
 
 Set-StrictMode -Version Latest
@@ -7,6 +8,7 @@ $ErrorActionPreference = "Stop"
 $script:StepIndex = 0
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
+$script:ScriptVersion = "0.1.0"
 
 $MediaIoPackageName = if ($env:MEDIAIO_NPM_PACKAGE) { $env:MEDIAIO_NPM_PACKAGE } else { "@mediaio/cli" }
 $MediaIoInstallDir = if ($env:MEDIAIO_INSTALL_DIR) { $env:MEDIAIO_INSTALL_DIR } else { Join-Path $HOME ".local\bin" }
@@ -483,13 +485,29 @@ function Remove-ClaudePlugin {
 }
 
 function Get-MediaIoSkillRoots {
+  $roots = New-Object System.Collections.Generic.List[string]
+  $skillSource = Join-Path $PSScriptRoot "skills"
+  if (Test-Path $skillSource) {
+    foreach ($skillDir in @(Get-ChildItem -Path $skillSource -Directory -ErrorAction SilentlyContinue | Where-Object {
+      Test-Path (Join-Path $_.FullName "SKILL.md")
+    })) {
+      $roots.Add((Join-Path $env:USERPROFILE ".codex\skills\$($skillDir.Name)"))
+      $roots.Add((Join-Path $env:USERPROFILE ".claude\skills\$($skillDir.Name)"))
+      $roots.Add((Join-Path $env:USERPROFILE ".agents\skills\$($skillDir.Name)"))
+    }
+  }
+
+  return @($roots | Select-Object -Unique)
+}
+
+function Get-MediaIoSkillNames {
+  $skillSource = Join-Path $PSScriptRoot "skills"
+  if (-not (Test-Path $skillSource)) { return @() }
+
   return @(
-    (Join-Path $env:USERPROFILE ".codex\skills\mediaio-generate"),
-    (Join-Path $env:USERPROFILE ".codex\skills\mediaio-install"),
-    (Join-Path $env:USERPROFILE ".claude\skills\mediaio-generate"),
-    (Join-Path $env:USERPROFILE ".claude\skills\mediaio-install"),
-    (Join-Path $env:USERPROFILE ".agents\skills\mediaio-generate"),
-    (Join-Path $env:USERPROFILE ".agents\skills\mediaio-install")
+    Get-ChildItem -Path $skillSource -Directory -ErrorAction SilentlyContinue |
+      Where-Object { Test-Path (Join-Path $_.FullName "SKILL.md") } |
+      ForEach-Object { $_.Name }
   )
 }
 
@@ -502,10 +520,16 @@ function Remove-SkillDirectories {
 function Invoke-MediaIoSkillRemove {
   if (Test-CommandAvailable "npx") {
     try {
+      $skillNames = @(Get-MediaIoSkillNames)
+      if ($skillNames.Count -eq 0) {
+        throw "No Media.io skill names were found in the local skills directory."
+      }
       $global:LASTEXITCODE = 0
-      $raw = (& cmd /c "npx --yes skills remove mediaio-generate mediaio-install -g -a codex -a claude-code -y" 2>&1 | Out-String)
+      $skillArgs = ($skillNames -join " ")
+      Write-Host "  Using npx fallback to remove Media.io skills" -ForegroundColor DarkGray
+      $raw = (& cmd /c "npx --yes skills remove $skillArgs -g -a codex -a claude-code -y" 2>&1 | Out-String)
       if ($LASTEXITCODE -eq 0) {
-        Write-Host "  OK: npx skills remove mediaio-generate mediaio-install" -ForegroundColor Green
+        Write-Host "  OK: npx skills remove $skillArgs" -ForegroundColor Green
       } else {
         Add-Warning "npx skills remove returned exit code $LASTEXITCODE. Falling back to direct directory removal. $raw"
       }
@@ -553,6 +577,7 @@ function Test-PersonalMarketplaceEntryAbsent {
 }
 
 Write-Host "Media.io uninstall script" -ForegroundColor White
+Write-Host "Script version: $script:ScriptVersion" -ForegroundColor DarkGray
 Write-Host "This script removes the Media.io CLI, Claude Code plugin, Codex plugin, and Media.io skills with checks after each step." -ForegroundColor DarkGray
 
 Invoke-CheckedStep "Uninstall Media.io CLI" {
