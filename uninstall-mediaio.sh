@@ -321,7 +321,10 @@ remove_claude_plugin_caches() {
 
 remove_skill_directories() {
   skill_count=0
-  for skill_name in $(get_mediaio_skill_names); do
+  # Read line by line: a skill directory name may contain spaces, and an unquoted
+  # "for ... in $(...)" would split one name into several, deleting whatever
+  # unrelated directories happen to match those fragments.
+  while IFS= read -r skill_name; do
     [ -n "$skill_name" ] || continue
     skill_count=$((skill_count + 1))
     for base in "$HOME/.agents/skills" "$HOME/.claude/skills" "$HOME/.codex/skills"; do
@@ -331,19 +334,23 @@ remove_skill_directories() {
         printf '  OK: removed skill directory %s\n' "$skill_root"
       fi
     done
-  done
+  done <<EOF
+$(get_mediaio_skill_names)
+EOF
   [ "$skill_count" -gt 0 ]
 }
 
 test_skill_directories_absent() {
   skill_count=0
-  for skill_name in $(get_mediaio_skill_names); do
+  while IFS= read -r skill_name; do
     [ -n "$skill_name" ] || continue
     skill_count=$((skill_count + 1))
     for base in "$HOME/.agents/skills" "$HOME/.claude/skills" "$HOME/.codex/skills"; do
       [ ! -d "$base/$skill_name" ] || return 1
     done
-  done
+  done <<EOF
+$(get_mediaio_skill_names)
+EOF
   [ "$skill_count" -gt 0 ]
 }
 
@@ -434,14 +441,18 @@ remove_mediaio_cli() {
 
 invoke_mediaio_skill_remove() {
   if require_command npx; then
-    skill_args=
-    for skill_name in $(get_mediaio_skill_names); do
+    # Collect the names into the positional parameters so that a name containing
+    # spaces stays a single npx argument instead of being split into several.
+    set --
+    while IFS= read -r skill_name; do
       [ -n "$skill_name" ] || continue
-      skill_args="$skill_args $skill_name"
-    done
-    if [ -n "$skill_args" ]; then
-      raw=$(npx --yes skills remove $skill_args -g -a codex -a claude-code -y 2>&1) && {
-        printf '  OK: npx skills remove%s\n' "$skill_args"
+      set -- "$@" "$skill_name"
+    done <<EOF
+$(get_mediaio_skill_names)
+EOF
+    if [ "$#" -gt 0 ]; then
+      raw=$(npx --yes skills remove "$@" -g -a codex -a claude-code -y 2>&1) && {
+        printf '  OK: npx skills remove %s\n' "$*"
       } || {
         add_warning "npx skills remove failed; falling back to direct directory removal. $raw"
       }
@@ -546,6 +557,8 @@ verify_claude_plugin_removed() {
 }
 
 verify_final_state() {
+  failures_before=$failure_count
+
   if verify_mediaio_package_removed; then
     printf '  OK: @mediaio/cli is absent from the npm global root\n'
   else
@@ -569,16 +582,34 @@ verify_final_state() {
   test_skill_directories_absent || add_failure "Final verification - some Media.io skill directories are still present."
 
   marketplace_path=$(get_personal_marketplace_path)
-  if [ -f "$marketplace_path" ]; then
+  if [ ! -f "$marketplace_path" ]; then
+    :
+  elif ! require_command node; then
+    add_warning "node is not available; the personal marketplace file was not checked for a leftover media-io entry."
+  else
+    entry_status=0
     node -e '
       const fs = require("fs");
       const path = process.argv[1];
-      const payload = JSON.parse(fs.readFileSync(path, "utf8"));
+      let payload;
+      try {
+        payload = JSON.parse(fs.readFileSync(path, "utf8"));
+      } catch (error) {
+        process.exit(2);
+      }
       const names = Array.isArray(payload.plugins) ? payload.plugins.map((entry) => entry && entry.name) : [];
       if (names.includes("media-io")) process.exit(1);
-    ' "$marketplace_path" || add_failure "Final verification - media-io remains in the personal marketplace file."
+    ' "$marketplace_path" || entry_status=$?
+    case "$entry_status" in
+      0) ;;
+      2) add_warning "Personal marketplace file exists but could not be parsed cleanly; treating the media-io entry as absent." ;;
+      *) add_failure "Final verification - media-io remains in the personal marketplace file." ;;
+    esac
   fi
-  printf '  OK: requested Media.io uninstall targets are absent\n'
+
+  if [ "$failure_count" -eq "$failures_before" ]; then
+    printf '  OK: requested Media.io uninstall targets are absent\n'
+  fi
 }
 
 print_list() {

@@ -1,5 +1,21 @@
 #!/bin/sh
+# Media.io setup script for macOS.
 # setup-mediaio.sh script version: 0.1.5
+# Installs the Media.io plugin, CLI, and skills in one pass.
+# CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
+#
+# Usage (from an existing shell session):
+#   curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/setup-mediaio.sh | sh
+#
+# Environment variables (all optional):
+#   MEDIAIO_INSTALL_DIR      — where to put the CLI binary       (default: ~/.local/bin)
+#   MEDIAIO_VERSION          — version to install                (default: latest)
+#   MEDIAIO_NPM_PACKAGE      — npm package name for the CLI      (default: @mediaio/cli)
+#   MEDIAIO_NPM_REGISTRY     — npm registry URL                  (default: https://registry.npmjs.org)
+#   MEDIAIO_RELEASE_REPO     — GitHub repo for release assets    (default: media-io/cli)
+#   MEDIAIO_SKILL_REPO       — GitHub repo for skill source       (default: media-io/plugin)
+#   MEDIAIO_SKILL_SOURCE     — local or remote skill source path
+#
 set -eu
 
 SCRIPT_ROOT=$(CDPATH= cd "$(dirname "$0")" && pwd)
@@ -36,6 +52,8 @@ codex_plugin_installed=0
 claude_plugin_ready=0
 codex_plugin_ready=0
 use_personal_marketplace_fallback=0
+personal_marketplace_fallback_reason=
+resolved_personal_marketplace_name=
 resolved_codex_marketplace_name=
 
 append_line() {
@@ -172,6 +190,9 @@ append_path_export_if_missing() {
   printf '\n%s\n' "$export_line" >>"$shell_rc"
 }
 
+# Keyed on the user's login shell, not on $ZSH_VERSION/$BASH_VERSION: those
+# describe whichever shell interprets this script, so the documented
+# "curl ... | sh" usage would always look like bash and never touch .zshrc.
 persist_path_dir_in_shells() {
   path_dir=$1
   updated=0
@@ -181,19 +202,29 @@ persist_path_dir_in_shells() {
     *) PATH=$path_dir:$PATH ;;
   esac
 
-  if [ -n "${ZSH_VERSION:-}" ] && [ -n "${HOME:-}" ]; then
-    append_path_export_if_missing "$HOME/.zshrc" "$path_dir"
-    updated=1
-  fi
+  [ -n "${HOME:-}" ] || return 0
 
-  if [ -n "${BASH_VERSION:-}" ] && [ -n "${HOME:-}" ]; then
-    append_path_export_if_missing "$HOME/.bashrc" "$path_dir"
-    append_path_export_if_missing "$HOME/.bash_profile" "$path_dir"
-    updated=1
-  fi
+  login_shell=${SHELL:-}
+  login_shell=${login_shell##*/}
 
-  if [ "$updated" -eq 0 ] && [ -n "${HOME:-}" ]; then
+  case "$login_shell" in
+    zsh)
+      append_path_export_if_missing "$HOME/.zshrc" "$path_dir"
+      updated=1
+      ;;
+    bash)
+      append_path_export_if_missing "$HOME/.bashrc" "$path_dir"
+      append_path_export_if_missing "$HOME/.bash_profile" "$path_dir"
+      updated=1
+      ;;
+  esac
+
+  # Unknown or unset $SHELL: fall back to the POSIX profile, plus any rc file
+  # that already exists, so an interactive shell still picks the directory up.
+  if [ "$updated" -eq 0 ]; then
     append_path_export_if_missing "$HOME/.profile" "$path_dir"
+    [ ! -f "$HOME/.zshrc" ] || append_path_export_if_missing "$HOME/.zshrc" "$path_dir"
+    [ ! -f "$HOME/.bashrc" ] || append_path_export_if_missing "$HOME/.bashrc" "$path_dir"
   fi
 }
 
@@ -499,11 +530,15 @@ get_skill_target_agent_args() {
 test_mediaio_skill_set_in_base() {
   base=$1
   skill_count=0
-  for skill_name in $(get_mediaio_skill_names); do
+  # Read line by line: a skill directory name may contain spaces, which an
+  # unquoted "for ... in $(...)" would split into separate names.
+  while IFS= read -r skill_name; do
     [ -n "$skill_name" ] || continue
     skill_count=$((skill_count + 1))
     [ -f "$base/$skill_name/SKILL.md" ] || return 1
-  done
+  done <<EOF
+$(get_mediaio_skill_names)
+EOF
   [ "$skill_count" -gt 0 ]
 }
 
@@ -532,6 +567,149 @@ test_codex_plugin_provided_skills_present() {
     done
     exit 1
   }
+}
+
+list_contains_line() {
+  needle=$1
+  haystack=$2
+  [ -n "$haystack" ] || return 1
+  printf '%s\n' "$haystack" | grep -Fqx "$needle"
+}
+
+# Emits one marketplace name per line. Returns non-zero when the list cannot be
+# read at all, so callers can tell "not visible" apart from "could not check".
+get_claude_marketplace_names() {
+  require_command claude || return 1
+  require_command node || return 1
+  claude plugin marketplace list --json 2>/dev/null | node -e '
+    let raw = "";
+    process.stdin.on("data", (chunk) => { raw += chunk; });
+    process.stdin.on("end", () => {
+      let data;
+      try { data = JSON.parse(raw); } catch (error) { process.exit(2); }
+      if (!Array.isArray(data)) process.exit(2);
+      const names = data.map((entry) => entry && entry.name).filter((name) => typeof name === "string" && name);
+      process.stdout.write(names.join("\n"));
+    });
+  '
+}
+
+get_claude_installed_plugin_ids() {
+  require_command claude || return 1
+  require_command node || return 1
+  claude plugin list --json 2>/dev/null | node -e '
+    let raw = "";
+    process.stdin.on("data", (chunk) => { raw += chunk; });
+    process.stdin.on("end", () => {
+      let data;
+      try { data = JSON.parse(raw); } catch (error) { process.exit(2); }
+      if (!Array.isArray(data)) process.exit(2);
+      const ids = data.map((entry) => entry && entry.id).filter((id) => typeof id === "string" && id);
+      process.stdout.write(ids.join("\n"));
+    });
+  '
+}
+
+# $1 is the top-level key to read: "installed" or "available".
+get_codex_plugin_ids() {
+  codex_list_key=$1
+  require_command codex || return 1
+  require_command node || return 1
+  codex plugin list --json --available 2>/dev/null | node -e '
+    const key = process.argv[1];
+    let raw = "";
+    process.stdin.on("data", (chunk) => { raw += chunk; });
+    process.stdin.on("end", () => {
+      let data;
+      try { data = JSON.parse(raw); } catch (error) { process.exit(2); }
+      const entries = data && data[key];
+      if (!Array.isArray(entries)) process.exit(2);
+      const ids = entries.map((entry) => entry && entry.pluginId).filter((id) => typeof id === "string" && id);
+      process.stdout.write(ids.join("\n"));
+    });
+  ' "$codex_list_key"
+}
+
+warn_if_claude_marketplace_not_visible() {
+  if claude_marketplace_names=$(get_claude_marketplace_names); then
+    if list_contains_line media-io "$claude_marketplace_names"; then
+      printf '  OK: Claude Code can see media-io in the configured marketplaces\n'
+    else
+      add_warning "Claude Code does not surface media-io from the configured marketplaces on this build."
+    fi
+  else
+    add_warning "Claude marketplace list could not be read; the media-io visibility check was skipped."
+  fi
+}
+
+warn_if_claude_plugin_not_listed() {
+  if claude_plugin_ids=$(get_claude_installed_plugin_ids); then
+    if list_contains_line "$MediaIoClaudePluginId" "$claude_plugin_ids"; then
+      printf '  OK: Claude Code lists %s as installed\n' "$MediaIoClaudePluginId"
+    else
+      add_warning "Claude Code does not currently list $MediaIoClaudePluginId in the installed plugin list."
+    fi
+  else
+    add_warning "Claude installed plugin list could not be read; the $MediaIoClaudePluginId check was skipped."
+  fi
+}
+
+# An already-installed plugin need not appear in the available[] snapshot, so the
+# installed[] list is checked first, exactly as the PowerShell script does.
+test_codex_marketplace_visible() {
+  expected_codex_plugin_id="$MediaIoCodexPluginName@$MediaIoCodexMarketplaceName"
+  codex_lists_readable=0
+
+  if codex_installed_ids=$(get_codex_plugin_ids installed); then
+    codex_lists_readable=1
+    if list_contains_line "$expected_codex_plugin_id" "$codex_installed_ids"; then
+      printf '  OK: Codex plugin %s is already installed\n' "$expected_codex_plugin_id"
+      return 0
+    fi
+  fi
+
+  if codex_available_ids=$(get_codex_plugin_ids available); then
+    codex_lists_readable=1
+    if list_contains_line "$expected_codex_plugin_id" "$codex_available_ids"; then
+      printf '  OK: Codex can see %s in the git marketplace snapshot\n' "$expected_codex_plugin_id"
+      return 0
+    fi
+  fi
+
+  # Being unable to read the lists is not evidence that the plugin is missing, so
+  # do not let it push the install into the personal marketplace fallback.
+  if [ "$codex_lists_readable" -eq 0 ]; then
+    add_warning "Codex plugin list could not be read; the $expected_codex_plugin_id visibility check was skipped."
+    return 0
+  fi
+
+  printf 'Codex does not surface %s from the git marketplace snapshot on this build.\n' "$expected_codex_plugin_id" >&2
+  return 1
+}
+
+warn_if_codex_plugin_not_listed() {
+  expected_codex_plugin_id="$MediaIoCodexPluginName@$1"
+  if codex_installed_ids=$(get_codex_plugin_ids installed); then
+    if list_contains_line "$expected_codex_plugin_id" "$codex_installed_ids"; then
+      printf '  OK: Codex lists %s as installed\n' "$expected_codex_plugin_id"
+    else
+      add_warning "Codex does not currently list $expected_codex_plugin_id in the installed plugin list."
+    fi
+  else
+    add_warning "Codex installed plugin list could not be read; the $expected_codex_plugin_id check was skipped."
+  fi
+}
+
+use_codex_personal_marketplace_fallback() {
+  fallback_reason=$1
+  if [ "$use_personal_marketplace_fallback" -eq 0 ]; then
+    add_warning "Using Codex personal marketplace fallback: $fallback_reason"
+    personal_marketplace_fallback_reason=$fallback_reason
+  else
+    printf '  Codex personal marketplace fallback still active: %s\n' "$fallback_reason"
+    [ -n "$personal_marketplace_fallback_reason" ] || personal_marketplace_fallback_reason=$fallback_reason
+  fi
+  use_personal_marketplace_fallback=1
 }
 
 get_personal_marketplace_path() {
@@ -610,7 +788,11 @@ initialize_local_mediaio_plugin_root() {
   [ -z "$temp_dir" ] || rm -rf "$temp_dir"
 }
 
+# Reports the marketplace name through $resolved_personal_marketplace_name rather
+# than stdout: this function also emits progress and warnings, which would end up
+# inside the value if callers captured it with a command substitution.
 initialize_personal_marketplace_fallback() {
+  resolved_personal_marketplace_name=
   marketplace_path=$(get_personal_marketplace_path)
   marketplace_name=$(get_personal_marketplace_name)
   display_name=$(format_display_name_from_name "$marketplace_name")
@@ -651,8 +833,10 @@ initialize_personal_marketplace_fallback() {
 
   mkdir -p "$(dirname "$marketplace_path")"
   write_json_no_bom "$marketplace_path" "$payload"
-  initialize_local_mediaio_plugin_root
-  printf '%s\n' "$marketplace_name"
+  # The marketplace entry points at ./plugins/media-io, so a missing plugin root
+  # would leave Codex with a dangling local source.
+  initialize_local_mediaio_plugin_root || return 1
+  resolved_personal_marketplace_name=$marketplace_name
 }
 
 install_skill_files() {
@@ -668,12 +852,7 @@ test_skill_directories_present() {
     while IFS= read -r base; do
       [ -n "$base" ] || continue
       base_count=$((base_count + 1))
-      skill_count=0
-      for skill_name in $(get_mediaio_skill_names); do
-        skill_count=$((skill_count + 1))
-        [ -d "$base/$skill_name" ] || exit 1
-      done
-      [ "$skill_count" -gt 0 ] || exit 1
+      test_mediaio_skill_set_in_base "$base" || exit 1
     done
     [ "$base_count" -gt 0 ] || exit 1
     exit 0
@@ -684,9 +863,12 @@ test_any_direct_skill_directories_present() {
   get_all_skill_target_bases | {
     while IFS= read -r base; do
       [ -n "$base" ] || continue
-      for skill_name in $(get_mediaio_skill_names); do
+      while IFS= read -r skill_name; do
+        [ -n "$skill_name" ] || continue
         [ -d "$base/$skill_name" ] && exit 0
-      done
+      done <<EOF
+$(get_mediaio_skill_names)
+EOF
     done
     exit 1
   }
@@ -722,23 +904,38 @@ invoke_checked_step "Run Media.io doctor" "mediaio doctor" "" "local Media.io ch
 if [ "$claude_available" -eq 1 ]; then
   invoke_checked_step "Add Media.io marketplace (Claude)" "claude plugin marketplace add '$MediaIoMarketplaceSource'" "" "marketplace is registered"
   invoke_checked_step "Refresh Media.io marketplace (Claude)" "claude plugin marketplace update media-io" "" "marketplace is refreshed"
+  invoke_checked_step "Verify marketplace visibility (Claude)" "warn_if_claude_marketplace_not_visible" "" "Marketplace lookup finished"
   invoke_checked_step "Install Claude Code plugin" "claude plugin install '$MediaIoClaudePluginId' -s user -y && claude_plugin_installed=1" "" "Claude Code plugin install completed"
-  invoke_checked_step "Verify Claude Code plugin install" "if test_claude_plugin_provided_skills_present; then claude_plugin_ready=1; else add_warning 'Claude Code plugin-provided skills are missing; direct skills install will be attempted with npx.'; fi" "" "Claude Code plugin install verification completed"
+  invoke_checked_step "Verify Claude Code plugin install" '
+    warn_if_claude_plugin_not_listed
+    if test_claude_plugin_provided_skills_present; then
+      claude_plugin_ready=1
+    else
+      add_warning "Claude Code plugin-provided skills are missing; direct skills install will be attempted with npx."
+    fi
+  ' "" "Claude Code plugin install verification completed"
 fi
 
 if [ "$codex_available" -eq 1 ]; then
   if ! invoke_soft_step "Add Media.io marketplace (Codex)" "codex plugin marketplace add '$MediaIoMarketplaceSource'" "Codex marketplace is registered"; then
-    use_personal_marketplace_fallback=1
+    use_codex_personal_marketplace_fallback "Codex marketplace add failed for '$MediaIoMarketplaceSource'."
   fi
   if [ "$use_personal_marketplace_fallback" -eq 0 ] && ! invoke_soft_step "Refresh Media.io marketplace (Codex)" "codex plugin marketplace upgrade '$MediaIoCodexMarketplaceName'" "Codex marketplace is refreshed"; then
-    use_personal_marketplace_fallback=1
+    use_codex_personal_marketplace_fallback "Codex marketplace refresh failed for '$MediaIoCodexMarketplaceName'."
+  fi
+  if [ "$use_personal_marketplace_fallback" -eq 0 ] && ! invoke_soft_step "Verify marketplace visibility (Codex)" "test_codex_marketplace_visible" "Codex marketplace lookup finished"; then
+    use_codex_personal_marketplace_fallback "Codex marketplace visibility check failed for '$MediaIoCodexPluginName@$MediaIoCodexMarketplaceName'."
   fi
   invoke_checked_step "Install Codex plugin" '
     if [ "$use_personal_marketplace_fallback" -eq 0 ] && codex plugin add "$MediaIoCodexPluginName@$MediaIoCodexMarketplaceName"; then
       resolved_codex_marketplace_name=$MediaIoCodexMarketplaceName
     else
-      add_warning "The git marketplace install failed. Switching to the personal marketplace fallback."
-      installed_marketplace_name=$(initialize_personal_marketplace_fallback)
+      use_codex_personal_marketplace_fallback "Codex git marketplace install failed for '\''$MediaIoCodexPluginName@$MediaIoCodexMarketplaceName'\''."
+      initialize_personal_marketplace_fallback || return 1
+      installed_marketplace_name=$resolved_personal_marketplace_name
+      [ -n "$installed_marketplace_name" ] || return 1
+      printf "  Installing through Codex personal marketplace fallback: %s@%s\n" "$MediaIoCodexPluginName" "$installed_marketplace_name"
+      printf "  Personal marketplace file: %s\n" "$(get_personal_marketplace_path)"
       codex plugin add "$MediaIoCodexPluginName@$installed_marketplace_name" || return 1
       resolved_codex_marketplace_name=$installed_marketplace_name
     fi
@@ -746,6 +943,7 @@ if [ "$codex_available" -eq 1 ]; then
   ' "" "Codex plugin install completed"
   invoke_checked_step "Verify Codex plugin install" '
     [ -n "$resolved_codex_marketplace_name" ] || return 1
+    warn_if_codex_plugin_not_listed "$resolved_codex_marketplace_name"
     if test_codex_plugin_provided_skills_present "$resolved_codex_marketplace_name"; then
       codex_plugin_ready=1
     else
@@ -768,17 +966,20 @@ else
   add_failure "Final verification - mediaio version failed"
 fi
 
-if [ "$claude_plugin_installed" -eq 1 ] || [ "$codex_plugin_installed" -eq 1 ]; then
-  if [ "$claude_plugin_ready" -eq 1 ] || [ "$codex_plugin_ready" -eq 1 ]; then
-    if test_any_direct_skill_directories_present; then
-      add_warning "Residual direct Media.io skill directories still exist alongside the plugin install."
-    fi
+if [ -z "$(get_all_skill_target_bases || true)" ]; then
+  add_warning "Neither Codex nor Claude Code is available; no Media.io skills target was verified."
+elif [ -n "$(get_skill_target_bases || true)" ]; then
+  # At least one available host is not plugin-ready, so the direct skills install
+  # had to cover it. Verify the skill files really landed there.
+  if test_skill_directories_present; then
+    printf '  OK: Media.io skill files are present for every host without a ready plugin\n'
+  else
+    add_failure "Final verification - Media.io skill files are still missing."
   fi
 else
-  if [ -z "$(get_skill_target_bases || true)" ]; then
-    add_warning "Neither Codex nor Claude Code is available; no Media.io skills target was verified."
-  elif ! test_skill_directories_present; then
-    add_failure "Final verification - Media.io skill directories are still missing."
+  printf '  OK: Media.io plugin-provided skills are present\n'
+  if test_any_direct_skill_directories_present; then
+    add_warning "Residual direct Media.io skill directories still exist alongside the plugin install."
   fi
 fi
 
