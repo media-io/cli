@@ -573,10 +573,13 @@ async function publishNpm(releaseVersion, releaseDistTag, githubTag, apiBase, gi
   const npmToken = requiredEnv("NODE_AUTH_TOKEN");
   const npmDistTag = releaseDistTag;
   const npmDirectory = mkdtempSync(join(tmpdir(), "mediaio-npmrc-"));
+  // 发布前的 npm view 会把旧 packument 写进共享缓存，npmjs 的 max-age 会让随后的
+  // 安装在数分钟内一直复用这份不含新版本的缓存；因此本次发布使用独立且一次性的缓存目录。
+  const npmCacheDirectory = mkdtempSync(join(tmpdir(), "mediaio-npm-cache-"));
   const publishCopy = createNpmPublishCopy(releaseVersion);
   const npmrcPath = join(npmDirectory, ".npmrc");
   writeFileSync(npmrcPath, `//registry.npmjs.org/:_authToken=${npmToken}\n`, { mode: 0o600 });
-  const npmEnv = { ...process.env, NPM_CONFIG_USERCONFIG: npmrcPath };
+  const npmEnv = { ...process.env, NPM_CONFIG_USERCONFIG: npmrcPath, NPM_CONFIG_CACHE: npmCacheDirectory };
   try {
     const existingPackage = tryRun("npm", ["view", `${packageName}@${releaseVersion}`, "version", "--registry=https://registry.npmjs.org"], { env: npmEnv });
     if (existingPackage.ok) {
@@ -592,9 +595,16 @@ async function publishNpm(releaseVersion, releaseDistTag, githubTag, apiBase, gi
     const smokeDirectory = mkdtempSync(join(tmpdir(), "mediaio-smoke-"));
     try {
       const npmRegistryPropagationDelaysMs = [0, 3_000, 5_000, 8_000, 10_000, 15_000, 15_000, 15_000, 15_000];
+      // --prefer-online 强制每次重试都回源校验 packument，否则重试只会命中同一份过期缓存而一直报 ETARGET。
       await runWithRetry(
         "npm",
-        ["install", "--prefix", smokeDirectory, "--registry=https://registry.npmjs.org", `${packageName}@${releaseVersion}`],
+        ["view", `${packageName}@${releaseVersion}`, "version", "--prefer-online", "--registry=https://registry.npmjs.org"],
+        { env: npmEnv },
+        npmRegistryPropagationDelaysMs,
+      );
+      await runWithRetry(
+        "npm",
+        ["install", "--prefix", smokeDirectory, "--prefer-online", "--registry=https://registry.npmjs.org", `${packageName}@${releaseVersion}`],
         { env: npmEnv },
         npmRegistryPropagationDelaysMs,
       );
@@ -605,6 +615,7 @@ async function publishNpm(releaseVersion, releaseDistTag, githubTag, apiBase, gi
     }
   } finally {
     rmSync(npmDirectory, { recursive: true, force: true });
+    rmSync(npmCacheDirectory, { recursive: true, force: true });
     rmSync(publishCopy.temporaryRoot, { recursive: true, force: true });
   }
   console.log(`[publish] npm published and verified: ${packageName}@${releaseVersion}`);
