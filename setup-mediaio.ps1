@@ -608,6 +608,29 @@ function Install-MediaIoCliFromNpmPackage {
   if (-not [string]::IsNullOrWhiteSpace($npmBinDir)) {
     Add-DirectoryToUserPath -Directory $npmBinDir
   }
+
+  if (-not (Wait-ForNpmInstalledMediaIo)) {
+    throw "npm install succeeded, but mediaio did not become available after 5 seconds. The release fallback will be tried."
+  }
+}
+
+function Test-MediaIoCliAvailable {
+  $global:LASTEXITCODE = 0
+  & cmd /c "mediaio version" *> $null
+  return ($LASTEXITCODE -eq 0)
+}
+
+function Wait-ForNpmInstalledMediaIo {
+  if (Test-MediaIoCliAvailable) { return $true }
+
+  $maxRetries = 5
+  for ($retry = 1; $retry -le $maxRetries; $retry++) {
+    Write-Host "  Waiting for the npm-installed mediaio command to become available ($retry/$maxRetries)..." -ForegroundColor DarkGray
+    Start-Sleep -Seconds 1
+    if (Test-MediaIoCliAvailable) { return $true }
+  }
+
+  return $false
 }
 
 function Resolve-MediaIoLatestVersion {
