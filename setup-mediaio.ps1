@@ -1,5 +1,5 @@
 # Media.io setup script for Windows.
-# setup-mediaio.ps1 script version: 0.1.11
+# setup-mediaio.ps1 script version: 0.1.12
 # Installs the Media.io CLI, Codex plugin, and direct skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
@@ -25,7 +25,7 @@ $ErrorActionPreference = "Stop"
 $script:StepIndex = 0
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
-$script:ScriptVersion = "0.1.11"
+$script:ScriptVersion = "0.1.12"
 $script:ResolvedClaudeMarketplaceName = $null
 $script:UseCodexPersonalMarketplaceFallback = $false
 $script:CodexPersonalMarketplaceFallbackReason = $null
@@ -47,7 +47,8 @@ $MediaIoCodexMarketplaceName = if ($env:MEDIAIO_CODEX_MARKETPLACE_NAME) { $env:M
 $MediaIoInstallDir = if ($env:MEDIAIO_INSTALL_DIR) { $env:MEDIAIO_INSTALL_DIR } else { Join-Path $HOME ".local\bin" }
 $MediaIoNpmRegistry = if ($env:MEDIAIO_NPM_REGISTRY) { $env:MEDIAIO_NPM_REGISTRY.TrimEnd('/') } else { "https://registry.npmjs.org" }
 $MediaIoReleaseRepo = if ($env:MEDIAIO_RELEASE_REPO) { $env:MEDIAIO_RELEASE_REPO } else { "media-io/cli" }
-$MediaIoReleaseBaseUrl = if ($env:MEDIAIO_RELEASE_BASE_URL) { $env:MEDIAIO_RELEASE_BASE_URL.TrimEnd('/') } else { "https://github.com/$MediaIoReleaseRepo/releases/download" }
+$MediaIoReleaseWebBase = if ($env:MEDIAIO_RELEASE_WEB_BASE) { $env:MEDIAIO_RELEASE_WEB_BASE.TrimEnd('/') } else { "https://github.com/$MediaIoReleaseRepo" }
+$MediaIoReleaseBaseUrl = if ($env:MEDIAIO_RELEASE_BASE_URL) { $env:MEDIAIO_RELEASE_BASE_URL.TrimEnd('/') } else { "$MediaIoReleaseWebBase/releases/download" }
 $MediaIoVersion = if ($env:MEDIAIO_VERSION) { $env:MEDIAIO_VERSION } else { "latest" }
 $MediaIoSkillRepo = if ($env:MEDIAIO_SKILL_REPO) { $env:MEDIAIO_SKILL_REPO } else { "media-io/skills" }
 $MediaIoSkillSource = if ($env:MEDIAIO_SKILL_SOURCE) { $env:MEDIAIO_SKILL_SOURCE } else { "" }
@@ -636,17 +637,27 @@ function Wait-ForNpmInstalledMediaIo {
 function Resolve-MediaIoLatestVersion {
   if ($script:MediaIoVersion -ne "latest") { return }
 
-  $latestApiUrl = "https://api.github.com/repos/$MediaIoReleaseRepo/releases/latest"
   try {
-    $latestRelease = Invoke-RestMethod -Uri $latestApiUrl -UseBasicParsing -ErrorAction Stop
-    $tag = [string]$latestRelease.tag_name
-    if (-not [string]::IsNullOrWhiteSpace($tag)) {
-      $script:MediaIoVersion = $tag
-      Write-Host "  Resolved latest Media.io CLI release to $script:MediaIoVersion" -ForegroundColor DarkGray
-      return
+    $baseUri = [Uri]$MediaIoReleaseWebBase
+    $response = Invoke-WebRequest -Uri "$MediaIoReleaseWebBase/releases/latest" -Method Head -UseBasicParsing -ErrorAction Stop
+    $finalUri = [Uri]$response.BaseResponse.ResponseUri
+    $prefix = ($baseUri.AbsolutePath.TrimEnd('/') + '/releases/tag/')
+    if ($finalUri.Scheme -ne $baseUri.Scheme -or
+        $finalUri.Authority -ne $baseUri.Authority -or
+        -not $finalUri.AbsolutePath.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
+      throw "latest release redirected to unexpected URL '$finalUri'."
     }
+
+    $tag = [Uri]::UnescapeDataString($finalUri.AbsolutePath.Substring($prefix.Length))
+    if ([string]::IsNullOrWhiteSpace($tag) -or $tag.Contains('/')) {
+      throw "invalid release tag in redirect URL '$finalUri'."
+    }
+
+    $script:MediaIoVersion = $tag
+    Write-Host "  Resolved latest Media.io CLI release to $script:MediaIoVersion" -ForegroundColor DarkGray
+    return
   } catch {
-    Add-Warning "Could not resolve latest Media.io CLI version from GitHub releases API: $($_.Exception.Message)"
+    Add-Warning "Could not resolve latest Media.io CLI version from the GitHub release redirect: $($_.Exception.Message)"
   }
 
   throw "Could not determine the latest Media.io CLI release version. Set MEDIAIO_VERSION explicitly."
