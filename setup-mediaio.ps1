@@ -1,6 +1,6 @@
 # Media.io setup script for Windows.
-# setup-mediaio.ps1 script version: 0.1.6
-# Installs the Media.io plugin, CLI, and skills in one pass.
+# setup-mediaio.ps1 script version: 0.1.8
+# Installs the Media.io CLI, Codex plugin, and direct skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
 # Usage (from an existing PowerShell session):
@@ -25,7 +25,7 @@ $ErrorActionPreference = "Stop"
 $script:StepIndex = 0
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
-$script:ScriptVersion = "0.1.6"
+$script:ScriptVersion = "0.1.8"
 $script:ResolvedClaudeMarketplaceName = $null
 $script:UseCodexPersonalMarketplaceFallback = $false
 $script:CodexPersonalMarketplaceFallbackReason = $null
@@ -865,25 +865,20 @@ function Test-MediaIoSkillsInstalled {
   }
 }
 
-function Get-MediaIoSkillAgentArgs {
-  $agents = @()
-  foreach ($target in @(Get-MediaIoSkillTargetBases)) {
-    $agents += "-a $($target.Agent)"
-  }
-
-  if ($agents.Count -eq 0) {
-    throw "Neither Codex nor Claude Code is available; cannot run targeted npx skills fallback."
-  }
-
-  return ($agents -join " ")
-}
-
 function Invoke-MediaIoSkillInstall {
   Invoke-CheckedStep "Install Media.io skills" {
     Ensure-NodeAndNpm
-    $agentArgs = Get-MediaIoSkillAgentArgs
-    Write-Host "  Installing Media.io skills with npx" -ForegroundColor DarkGray
-    & cmd /c "npx --yes skills add $MediaIoSkillRepo -g $agentArgs --skill * -y"
+    $targets = @(Get-MediaIoSkillTargetBases)
+    if ($targets.Count -eq 0) {
+      throw "Neither Codex nor Claude Code is available; cannot run targeted npx skills install."
+    }
+    foreach ($target in $targets) {
+      Write-Host "  Installing Media.io skills for $($target.Agent) with npx" -ForegroundColor DarkGray
+      & cmd /c "npx --yes skills add $MediaIoSkillRepo -g -a $($target.Agent) --skill * -y"
+      if ($LASTEXITCODE -ne 0) {
+        throw "npx skills add failed for $($target.Agent)."
+      }
+    }
   } {
     Test-MediaIoSkillsInstalled
   } -SuccessMessage "Media.io skills are installed"
@@ -1204,12 +1199,11 @@ function Get-ClaudeMarketplaceIds {
 
 Write-Host "Media.io setup script" -ForegroundColor White
 Write-Host "Script version: $script:ScriptVersion" -ForegroundColor DarkGray
-Write-Host "This script installs the Media.io plugin, CLI, and skills. The CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable." -ForegroundColor DarkGray
+Write-Host "This script installs the Media.io CLI, Codex plugin, and skills. Claude Code skills are installed directly with npx; the CLI prefers npm and falls back to a release archive." -ForegroundColor DarkGray
 
-Invoke-OptionalHostDetection "Preflight: locate claude" "claude" {
-  param([bool]$Available)
-  $script:ClaudeAvailable = $Available
-}
+Write-Step "Prepare Claude Code skills target"
+$script:ClaudeAvailable = $true
+Write-Host "  Claude Code CLI is not required; skills will be installed directly for claude-code." -ForegroundColor DarkGray
 
 Invoke-OptionalHostDetection "Preflight: locate codex" "codex" {
   param([bool]$Available)
@@ -1230,53 +1224,8 @@ Invoke-CheckedStep "Run Media.io doctor" {
 } -SuccessMessage "local Media.io checks passed"
 
 if ($script:ClaudeAvailable) {
-  Invoke-CheckedStep "Add Media.io marketplace" {
-    & cmd /c "claude plugin marketplace add $MediaIoMarketplaceSource"
-  } -SuccessMessage "marketplace is registered"
-
-  Invoke-CheckedStep "Refresh Media.io marketplace" {
-    & cmd /c "claude plugin marketplace update media-io"
-  } -SuccessMessage "marketplace is refreshed"
-
-  Invoke-CheckedStep "Verify marketplace visibility" {
-    $availableIds = Get-ClaudeMarketplaceIds
-    if ($availableIds -contains "media-io") {
-      Write-Host "  OK: Claude Code can see media-io in the configured marketplaces" -ForegroundColor Green
-    } else {
-      Add-Warning "Claude Code does not surface media-io from the configured marketplaces on this build."
-    }
-  } -SuccessMessage "Marketplace lookup finished"
-
-  Invoke-CheckedStep "Install Claude Code plugin" {
-    & cmd /c "claude plugin install $MediaIoClaudePluginId -s user -y"
-    if ($LASTEXITCODE -ne 0) {
-      throw "claude plugin install $MediaIoClaudePluginId failed."
-    }
-    $script:ResolvedClaudeMarketplaceName = "media-io"
-    $script:ClaudePluginInstalled = $true
-  } -SuccessMessage "Claude Code plugin install completed"
-
-  Invoke-CheckedStep "Verify Claude Code plugin install" {
-    if ([string]::IsNullOrWhiteSpace([string]$script:ResolvedClaudeMarketplaceName)) {
-      throw "Claude marketplace name was not recorded."
-    }
-
-    $raw = (& cmd /c "claude plugin list --json" | Out-String)
-    $parsed = $raw | ConvertFrom-Json
-    $ids = @($parsed | ForEach-Object { $_.id })
-    if ($ids -notcontains $MediaIoClaudePluginId) {
-      Add-Warning "Claude Code does not currently list $MediaIoClaudePluginId in the installed plugin list."
-    } else {
-      Write-Host "  OK: Claude Code lists $MediaIoClaudePluginId as installed" -ForegroundColor Green
-    }
-
-    if (Test-ClaudePluginProvidedSkillsPresent) {
-      Write-Host "  OK: Claude Code plugin-provided skills are present" -ForegroundColor Green
-      $script:ClaudePluginReady = $true
-    } else {
-      Add-Warning "Claude Code plugin-provided skills are missing; direct skills install will be attempted with npx."
-    }
-  } -SuccessMessage "Claude Code plugin install verification completed"
+  Write-Step "Use direct Media.io skills for Claude Code"
+  Write-Host "  Claude Code plugin installation is skipped; skills will be installed with npx for claude-code only." -ForegroundColor DarkGray
 }
 
 if ($script:CodexAvailable) {

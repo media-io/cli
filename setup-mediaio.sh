@@ -1,7 +1,7 @@
 #!/bin/sh
 # Media.io setup script for macOS.
-# setup-mediaio.sh script version: 0.1.6
-# Installs the Media.io plugin, CLI, and skills in one pass.
+# setup-mediaio.sh script version: 0.1.8
+# Installs the Media.io CLI, Codex plugin, and direct skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
 # Usage (from an existing shell session):
@@ -25,7 +25,7 @@ failure_count=0
 warning_count=0
 failures=
 warnings=
-SCRIPT_VERSION="0.1.6"
+SCRIPT_VERSION="0.1.8"
 MediaIoPackageName=${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}
 MediaIoMarketplaceSource=${MEDIAIO_MARKETPLACE_SOURCE:-media-io/plugin}
 MediaIoClaudePluginId=${MEDIAIO_CLAUDE_PLUGIN_ID:-media-io@media-io}
@@ -537,16 +537,13 @@ get_all_skill_target_bases() {
   [ "$claude_available" -eq 1 ] && printf '%s\n' "$HOME/.claude/skills"
 }
 
-get_skill_target_agent_args() {
-  args=
+get_skill_target_agents() {
   if [ "$codex_available" -eq 1 ] && [ "$codex_plugin_ready" -eq 0 ]; then
-    args="$args -a codex"
+    printf '%s\n' codex
   fi
   if [ "$claude_available" -eq 1 ] && [ "$claude_plugin_ready" -eq 0 ]; then
-    args="$args -a claude-code"
+    printf '%s\n' claude-code
   fi
-  [ -n "$args" ] || return 1
-  printf '%s\n' "$args"
 }
 
 test_mediaio_skill_set_in_base() {
@@ -881,10 +878,16 @@ initialize_personal_marketplace_fallback() {
 }
 
 install_skill_files() {
-  agent_args=$(get_skill_target_agent_args) || return 1
-  printf '  Installing Media.io skills with npx\n'
+  agents=$(get_skill_target_agents)
+  [ -n "$agents" ] || return 1
   ensure_node_and_npm || return 1
-  npx --yes skills add "$MediaIoSkillRepo" -g $agent_args --skill '*' -y
+  while IFS= read -r agent; do
+    [ -n "$agent" ] || continue
+    printf '  Installing Media.io skills for %s with npx\n' "$agent"
+    npx --yes skills add "$MediaIoSkillRepo" -g -a "$agent" --skill '*' -y || return 1
+  done <<EOF
+$agents
+EOF
 }
 
 test_skill_directories_present() {
@@ -935,26 +938,18 @@ print_list() {
 
 printf '%s\n' "Media.io setup script"
 printf 'Script version: %s\n' "$SCRIPT_VERSION"
-printf '%s\n' "This script installs the Media.io plugin, CLI, and skills. The CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable."
+printf '%s\n' "This script installs the Media.io CLI, Codex plugin, and skills. Claude Code skills are installed directly with npx; the CLI prefers npm and falls back to a release archive."
 
-check_optional_host "Preflight: locate claude" claude claude_available
+write_step "Prepare Claude Code skills target"
+claude_available=1
+printf '%s\n' "  Claude Code CLI is not required; skills will be installed directly for claude-code."
 check_optional_host "Preflight: locate codex" codex codex_available
 invoke_optional_fallback_step "Install Media.io CLI" "ensure_node_and_npm && install_mediaio_cli_from_npm_package" "install_mediaio_cli_from_release" "verify_mediaio_cli_available" "Media.io CLI is installed"
 invoke_checked_step "Run Media.io doctor" "mediaio doctor" "" "local Media.io checks passed"
 
 if [ "$claude_available" -eq 1 ]; then
-  invoke_checked_step "Add Media.io marketplace (Claude)" "add_claude_marketplace" "" "marketplace is registered"
-  invoke_checked_step "Refresh Media.io marketplace (Claude)" "claude plugin marketplace update media-io" "" "marketplace is refreshed"
-  invoke_checked_step "Verify marketplace visibility (Claude)" "warn_if_claude_marketplace_not_visible" "" "Marketplace lookup finished"
-  invoke_checked_step "Install Claude Code plugin" "claude plugin install '$MediaIoClaudePluginId' -s user -y && claude_plugin_installed=1" "" "Claude Code plugin install completed"
-  invoke_checked_step "Verify Claude Code plugin install" '
-    warn_if_claude_plugin_not_listed
-    if test_claude_plugin_provided_skills_present; then
-      claude_plugin_ready=1
-    else
-      add_warning "Claude Code plugin-provided skills are missing; direct skills install will be attempted with npx."
-    fi
-  ' "" "Claude Code plugin install verification completed"
+  write_step "Use direct Media.io skills for Claude Code"
+  printf '%s\n' "  Claude Code plugin installation is skipped; skills will be installed with npx for claude-code only."
 fi
 
 if [ "$codex_available" -eq 1 ]; then
@@ -993,7 +988,7 @@ if [ "$codex_available" -eq 1 ]; then
   ' "" "Codex plugin install verification completed"
 fi
 
-if [ -z "$(get_skill_target_agent_args 2>/dev/null || true)" ]; then
+if [ -z "$(get_skill_target_agents 2>/dev/null || true)" ]; then
   write_step "Skip direct Media.io skills install"
   printf '  OK: plugin-provided skills are installed; direct skills install is skipped to avoid duplicate entries\n'
 else
