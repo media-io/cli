@@ -1,5 +1,5 @@
 # Media.io setup script for Windows.
-# setup-mediaio.ps1 script version: 0.1.9
+# setup-mediaio.ps1 script version: 0.1.10
 # Installs the Media.io CLI, Codex plugin, and direct skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
@@ -25,7 +25,7 @@ $ErrorActionPreference = "Stop"
 $script:StepIndex = 0
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
-$script:ScriptVersion = "0.1.9"
+$script:ScriptVersion = "0.1.10"
 $script:ResolvedClaudeMarketplaceName = $null
 $script:UseCodexPersonalMarketplaceFallback = $false
 $script:CodexPersonalMarketplaceFallbackReason = $null
@@ -867,11 +867,15 @@ function Test-MediaIoSkillsInstalled {
 
 function Invoke-MediaIoSkillInstall {
   Invoke-CheckedStep "Install Media.io skills" {
-    Ensure-NodeAndNpm
     $targets = @(Get-MediaIoSkillTargetBases)
     if ($targets.Count -eq 0) {
       throw "Neither Codex nor Claude Code is available; cannot run targeted npx skills install."
     }
+    if (-not (Test-CommandAvailable "npx")) {
+      Install-MediaIoSkillsManually -Targets $targets
+      return
+    }
+    Ensure-NodeAndNpm
     foreach ($target in $targets) {
       Write-Host "  Installing Media.io skills for $($target.Agent) with npx" -ForegroundColor DarkGray
       & cmd /c "npx --yes skills add $MediaIoSkillRepo -g -a $($target.Agent) --skill * -y"
@@ -882,6 +886,45 @@ function Invoke-MediaIoSkillInstall {
   } {
     Test-MediaIoSkillsInstalled
   } -SuccessMessage "Media.io skills are installed"
+}
+
+function Install-MediaIoSkillsManually {
+  param([Parameter(Mandatory = $true)][object[]]$Targets)
+
+  $archiveUrl = if ($env:MEDIAIO_SKILL_ARCHIVE_URL) {
+    $env:MEDIAIO_SKILL_ARCHIVE_URL
+  } else {
+    "https://github.com/$MediaIoSkillRepo/archive/refs/heads/main.zip"
+  }
+  $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) "mediaio-skills-$PID"
+  $archivePath = Join-Path $tmpDir "skills.zip"
+  $extractRoot = Join-Path $tmpDir "extract"
+
+  try {
+    New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+    Write-Host "  npx is unavailable; installing Media.io skills manually from $archiveUrl" -ForegroundColor Yellow
+    Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath -UseBasicParsing -ErrorAction Stop
+    Expand-Archive -LiteralPath $archivePath -DestinationPath $extractRoot -Force
+
+    $skillFile = Get-ChildItem -LiteralPath $extractRoot -Recurse -File -Filter "SKILL.md" -ErrorAction SilentlyContinue |
+      Select-Object -First 1
+    if ($null -eq $skillFile) { throw "The downloaded Media.io skills archive contains no SKILL.md files." }
+    $skillRoot = Split-Path -Parent (Split-Path -Parent $skillFile.FullName)
+    $skillDirs = @(Get-ChildItem -LiteralPath $skillRoot -Directory | Where-Object {
+      Test-Path (Join-Path $_.FullName "SKILL.md")
+    })
+    if ($skillDirs.Count -eq 0) { throw "The downloaded Media.io skills archive contains no top-level skill directories." }
+
+    foreach ($target in $Targets) {
+      New-Item -ItemType Directory -Path $target.BaseDir -Force | Out-Null
+      foreach ($skillDir in $skillDirs) {
+        Copy-Item -LiteralPath $skillDir.FullName -Destination $target.BaseDir -Recurse -Force
+      }
+      Write-Host "  Installed Media.io skills manually for $($target.Agent)" -ForegroundColor Green
+    }
+  } finally {
+    Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function Test-MediaIoPluginInstalled {
