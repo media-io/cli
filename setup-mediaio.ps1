@@ -1,5 +1,5 @@
 # Media.io setup script for Windows.
-# setup-mediaio.ps1 script version: 0.1.5
+# setup-mediaio.ps1 script version: 0.1.6
 # Installs the Media.io plugin, CLI, and skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
@@ -25,7 +25,7 @@ $ErrorActionPreference = "Stop"
 $script:StepIndex = 0
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
-$script:ScriptVersion = "0.1.5"
+$script:ScriptVersion = "0.1.6"
 $script:ResolvedClaudeMarketplaceName = $null
 $script:UseCodexPersonalMarketplaceFallback = $false
 $script:CodexPersonalMarketplaceFallbackReason = $null
@@ -82,9 +82,17 @@ function Add-DirectoryToPath {
   if (-not (Test-Path $Directory)) { return $false }
 
   $segments = @($env:Path -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-  if ($segments -contains $Directory) { return $false }
+  # A previous release may have installed mediaio into a different directory.
+  # Keep the newly installed command ahead of that older one even when this
+  # directory already exists later in PATH.
+  $normalizedDirectory = $Directory.TrimEnd('\', '/')
+  $remainingSegments = @($segments | Where-Object {
+    -not [string]::Equals($_.TrimEnd('\', '/'), $normalizedDirectory, [System.StringComparison]::OrdinalIgnoreCase)
+  })
+  $newPath = (@($Directory) + $remainingSegments) -join ';'
+  if ($env:Path -eq $newPath) { return $false }
 
-  $env:Path = "$Directory;$env:Path"
+  $env:Path = $newPath
   return $true
 }
 
@@ -143,13 +151,14 @@ function Add-DirectoryToUserPath {
   [void](Add-DirectoryToPath -Directory $Directory)
   $userPath = Get-UserEnvironmentPathValue
   $segments = @($userPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-  if ($segments -contains $Directory) { return }
+  $normalizedDirectory = $Directory.TrimEnd('\', '/')
+  $remainingSegments = @($segments | Where-Object {
+    -not [string]::Equals($_.TrimEnd('\', '/'), $normalizedDirectory, [System.StringComparison]::OrdinalIgnoreCase)
+  })
+  $newUserPath = (@($Directory) + $remainingSegments) -join ';'
+  if ($userPath -eq $newUserPath) { return }
 
-  if ([string]::IsNullOrWhiteSpace($userPath)) {
-    Set-UserEnvironmentPathValue -Value $Directory
-  } else {
-    Set-UserEnvironmentPathValue -Value "$Directory;$userPath"
-  }
+  Set-UserEnvironmentPathValue -Value $newUserPath
 
   Broadcast-EnvironmentChange
 }
