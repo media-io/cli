@@ -1,5 +1,5 @@
 # Media.io setup script for Windows.
-# setup-mediaio.ps1 script version: 0.1.10
+# setup-mediaio.ps1 script version: 0.1.11
 # Installs the Media.io CLI, Codex plugin, and direct skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
@@ -25,7 +25,7 @@ $ErrorActionPreference = "Stop"
 $script:StepIndex = 0
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
-$script:ScriptVersion = "0.1.10"
+$script:ScriptVersion = "0.1.11"
 $script:ResolvedClaudeMarketplaceName = $null
 $script:UseCodexPersonalMarketplaceFallback = $false
 $script:CodexPersonalMarketplaceFallbackReason = $null
@@ -608,6 +608,29 @@ function Install-MediaIoCliFromNpmPackage {
   if (-not [string]::IsNullOrWhiteSpace($npmBinDir)) {
     Add-DirectoryToUserPath -Directory $npmBinDir
   }
+
+  if (-not (Wait-ForNpmInstalledMediaIo)) {
+    throw "npm install succeeded, but mediaio did not become available after 5 seconds. The release fallback will be tried."
+  }
+}
+
+function Test-MediaIoCliAvailable {
+  $global:LASTEXITCODE = 0
+  & cmd /c "mediaio version" *> $null
+  return ($LASTEXITCODE -eq 0)
+}
+
+function Wait-ForNpmInstalledMediaIo {
+  if (Test-MediaIoCliAvailable) { return $true }
+
+  $maxRetries = 5
+  for ($retry = 1; $retry -le $maxRetries; $retry++) {
+    Write-Host "  Waiting for the npm-installed mediaio command to become available ($retry/$maxRetries)..." -ForegroundColor DarkGray
+    Start-Sleep -Seconds 1
+    if (Test-MediaIoCliAvailable) { return $true }
+  }
+
+  return $false
 }
 
 function Resolve-MediaIoLatestVersion {

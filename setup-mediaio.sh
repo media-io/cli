@@ -1,6 +1,6 @@
 #!/bin/sh
 # Media.io setup script for macOS.
-# setup-mediaio.sh script version: 0.1.10
+# setup-mediaio.sh script version: 0.1.11
 # Installs the Media.io CLI, Codex plugin, and direct skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
@@ -25,7 +25,7 @@ failure_count=0
 warning_count=0
 failures=
 warnings=
-SCRIPT_VERSION="0.1.10"
+SCRIPT_VERSION="0.1.11"
 MediaIoPackageName=${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}
 MediaIoMarketplaceSource=${MEDIAIO_MARKETPLACE_SOURCE:-media-io/plugin}
 MediaIoClaudePluginId=${MEDIAIO_CLAUDE_PLUGIN_ID:-media-io@media-io}
@@ -460,13 +460,34 @@ verify_mediaio_cli_available() {
   [ -x "$MediaIoInstallDir/mediaio" ]
 }
 
+wait_for_npm_installed_mediaio() {
+  retry=1
+  max_retries=5
+
+  if verify_mediaio_cli_available; then
+    return 0
+  fi
+
+  while [ "$retry" -le "$max_retries" ]; do
+    printf '  Waiting for the npm-installed mediaio command to become available (%s/%s)...\n' "$retry" "$max_retries"
+    sleep 1
+    if verify_mediaio_cli_available; then
+      return 0
+    fi
+    retry=$((retry + 1))
+  done
+
+  return 1
+}
+
 install_mediaio_cli_from_npm_package() {
   [ "$MediaIoNodeReady" -eq 1 ] || return 1
   npm install -g "$MediaIoPackageName" || return 1
   npm_bin_dir=$(get_npm_global_bin_dir)/bin
   persist_path_dir_in_shells "$npm_bin_dir"
-  if ! verify_mediaio_cli_available; then
-    add_warning "npm install succeeded, but mediaio is not yet on PATH. Persisting the npm global bin directory and continuing."
+  if ! wait_for_npm_installed_mediaio; then
+    add_warning "npm install succeeded, but mediaio did not become available after 5 seconds. Persisted the npm global bin directory; the release fallback will be tried."
+    return 1
   fi
 }
 
