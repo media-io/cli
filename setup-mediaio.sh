@@ -1,6 +1,6 @@
 #!/bin/sh
 # Media.io setup script for macOS.
-# setup-mediaio.sh script version: 0.1.9
+# setup-mediaio.sh script version: 0.1.10
 # Installs the Media.io CLI, Codex plugin, and direct skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
@@ -25,7 +25,7 @@ failure_count=0
 warning_count=0
 failures=
 warnings=
-SCRIPT_VERSION="0.1.9"
+SCRIPT_VERSION="0.1.10"
 MediaIoPackageName=${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}
 MediaIoMarketplaceSource=${MEDIAIO_MARKETPLACE_SOURCE:-media-io/plugin}
 MediaIoClaudePluginId=${MEDIAIO_CLAUDE_PLUGIN_ID:-media-io@media-io}
@@ -880,6 +880,10 @@ initialize_personal_marketplace_fallback() {
 install_skill_files() {
   agents=$(get_skill_target_agents)
   [ -n "$agents" ] || return 1
+  if ! require_command npx; then
+    install_skill_files_manually "$agents"
+    return
+  fi
   ensure_node_and_npm || return 1
   while IFS= read -r agent; do
     [ -n "$agent" ] || continue
@@ -888,6 +892,65 @@ install_skill_files() {
   done <<EOF
 $agents
 EOF
+}
+
+# npx is optional for skills installation. When it is unavailable, download
+# the source archive and copy every top-level skill directory to each explicitly
+# selected host. Existing unrelated skills are never removed.
+install_skill_files_manually() {
+  agents=$1
+  archive_url=${MEDIAIO_SKILL_ARCHIVE_URL:-"https://github.com/$MediaIoSkillRepo/archive/refs/heads/main.zip"}
+  temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/mediaio-skills.XXXXXX") || return 1
+  archive_path=$temp_dir/skills.zip
+  extract_root=$temp_dir/extract
+  mkdir -p "$extract_root" || { rm -rf "$temp_dir"; return 1; }
+
+  printf '  npx is unavailable; installing Media.io skills manually from %s\n' "$archive_url"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$archive_url" -o "$archive_path" || { rm -rf "$temp_dir"; return 1; }
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$archive_path" "$archive_url" || { rm -rf "$temp_dir"; return 1; }
+  else
+    add_warning "npx is unavailable and neither curl nor wget is available for manual skills installation."
+    rm -rf "$temp_dir"
+    return 1
+  fi
+
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -q "$archive_path" -d "$extract_root" || { rm -rf "$temp_dir"; return 1; }
+  elif command -v tar >/dev/null 2>&1; then
+    tar -xf "$archive_path" -C "$extract_root" || { rm -rf "$temp_dir"; return 1; }
+  else
+    add_warning "npx is unavailable and neither unzip nor tar is available for manual skills installation."
+    rm -rf "$temp_dir"
+    return 1
+  fi
+
+  skill_file=$(find "$extract_root" -type f -name SKILL.md -print | head -n 1)
+  if [ -z "$skill_file" ]; then
+    add_warning "The downloaded Media.io skills archive contains no SKILL.md files."
+    rm -rf "$temp_dir"
+    return 1
+  fi
+  skill_root=$(dirname "$(dirname "$skill_file")")
+
+  while IFS= read -r agent; do
+    [ -n "$agent" ] || continue
+    case "$agent" in
+      codex) base_dir=$HOME/.codex/skills ;;
+      claude-code) base_dir=$HOME/.claude/skills ;;
+      *) rm -rf "$temp_dir"; return 1 ;;
+    esac
+    mkdir -p "$base_dir" || { rm -rf "$temp_dir"; return 1; }
+    for skill_dir in "$skill_root"/*; do
+      [ -f "$skill_dir/SKILL.md" ] || continue
+      cp -R "$skill_dir" "$base_dir/" || { rm -rf "$temp_dir"; return 1; }
+    done
+    printf '  Installed Media.io skills manually for %s\n' "$agent"
+  done <<EOF
+$agents
+EOF
+  rm -rf "$temp_dir"
 }
 
 test_skill_directories_present() {
