@@ -1,6 +1,6 @@
 #!/bin/sh
 # Media.io setup script for macOS.
-# setup-mediaio.sh script version: 0.1.5
+# setup-mediaio.sh script version: 0.1.6
 # Installs the Media.io plugin, CLI, and skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
@@ -25,7 +25,7 @@ failure_count=0
 warning_count=0
 failures=
 warnings=
-SCRIPT_VERSION="0.1.5"
+SCRIPT_VERSION="0.1.6"
 MediaIoPackageName=${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}
 MediaIoMarketplaceSource=${MEDIAIO_MARKETPLACE_SOURCE:-media-io/plugin}
 MediaIoClaudePluginId=${MEDIAIO_CLAUDE_PLUGIN_ID:-media-io@media-io}
@@ -179,15 +179,40 @@ check_optional_host() {
   fi
 }
 
-append_path_export_if_missing() {
+move_path_dir_to_front() {
+  path_dir=$1
+  remaining_path=$(printf '%s\n' "$PATH" | awk -F: -v target="$path_dir" '
+    {
+      for (part = 1; part <= NF; part++) {
+        if ($part == "" || $part == target) continue
+        printf "%s%s", separator, $part
+        separator = ":"
+      }
+    }
+  ')
+  PATH=$path_dir${remaining_path:+:$remaining_path}
+  export PATH
+}
+
+append_path_export_at_end() {
   shell_rc=$1
   path_dir=$2
   export_line="export PATH=\"$path_dir:\$PATH\""
 
   [ -n "$shell_rc" ] || return 0
   [ -f "$shell_rc" ] || : >"$shell_rc"
-  grep -Fqx "$export_line" "$shell_rc" 2>/dev/null && return 0
-  printf '\n%s\n' "$export_line" >>"$shell_rc"
+
+  # Remove prior copies and append one final export. A final export wins over a
+  # fallback installation directory that may have been added by an older run.
+  temp_file=$(mktemp "${TMPDIR:-/tmp}/mediaio-path.XXXXXX") || return 1
+  grep -Fvx "$export_line" "$shell_rc" >"$temp_file"
+  grep_status=$?
+  if [ "$grep_status" -gt 1 ]; then
+    rm -f "$temp_file"
+    return "$grep_status"
+  fi
+  printf '\n%s\n' "$export_line" >>"$temp_file"
+  mv "$temp_file" "$shell_rc"
 }
 
 # Keyed on the user's login shell, not on $ZSH_VERSION/$BASH_VERSION: those
@@ -197,10 +222,7 @@ persist_path_dir_in_shells() {
   path_dir=$1
   updated=0
 
-  case ":$PATH:" in
-    *":$path_dir:"*) ;;
-    *) PATH=$path_dir:$PATH ;;
-  esac
+  move_path_dir_to_front "$path_dir"
 
   [ -n "${HOME:-}" ] || return 0
 
@@ -209,12 +231,12 @@ persist_path_dir_in_shells() {
 
   case "$login_shell" in
     zsh)
-      append_path_export_if_missing "$HOME/.zshrc" "$path_dir"
+      append_path_export_at_end "$HOME/.zshrc" "$path_dir"
       updated=1
       ;;
     bash)
-      append_path_export_if_missing "$HOME/.bashrc" "$path_dir"
-      append_path_export_if_missing "$HOME/.bash_profile" "$path_dir"
+      append_path_export_at_end "$HOME/.bashrc" "$path_dir"
+      append_path_export_at_end "$HOME/.bash_profile" "$path_dir"
       updated=1
       ;;
   esac
@@ -222,9 +244,9 @@ persist_path_dir_in_shells() {
   # Unknown or unset $SHELL: fall back to the POSIX profile, plus any rc file
   # that already exists, so an interactive shell still picks the directory up.
   if [ "$updated" -eq 0 ]; then
-    append_path_export_if_missing "$HOME/.profile" "$path_dir"
-    [ ! -f "$HOME/.zshrc" ] || append_path_export_if_missing "$HOME/.zshrc" "$path_dir"
-    [ ! -f "$HOME/.bashrc" ] || append_path_export_if_missing "$HOME/.bashrc" "$path_dir"
+    append_path_export_at_end "$HOME/.profile" "$path_dir"
+    [ ! -f "$HOME/.zshrc" ] || append_path_export_at_end "$HOME/.zshrc" "$path_dir"
+    [ ! -f "$HOME/.bashrc" ] || append_path_export_at_end "$HOME/.bashrc" "$path_dir"
   fi
 }
 
@@ -654,6 +676,25 @@ warn_if_claude_plugin_not_listed() {
   fi
 }
 
+# Newer Claude Code versions reject `marketplace add` when the marketplace is
+# already declared in settings with the same name but a differently shaped
+# network source (for example, a pinned ref). Keep that user-managed
+# declaration intact and continue with its refresh/install path.
+add_claude_marketplace() {
+  output=$(claude plugin marketplace add "$MediaIoMarketplaceSource" 2>&1)
+  status=$?
+  [ -z "$output" ] || printf '%s\n' "$output"
+  [ "$status" -eq 0 ] && return 0
+
+  case "$output" in
+    *"its network source differs from the one declared for it in settings"*)
+      add_warning "Claude Code already has a differently declared media-io marketplace; using the existing declaration."
+      return 0
+      ;;
+  esac
+  return "$status"
+}
+
 # An already-installed plugin need not appear in the available[] snapshot, so the
 # installed[] list is checked first, exactly as the PowerShell script does.
 test_codex_marketplace_visible() {
@@ -902,7 +943,7 @@ invoke_optional_fallback_step "Install Media.io CLI" "ensure_node_and_npm && ins
 invoke_checked_step "Run Media.io doctor" "mediaio doctor" "" "local Media.io checks passed"
 
 if [ "$claude_available" -eq 1 ]; then
-  invoke_checked_step "Add Media.io marketplace (Claude)" "claude plugin marketplace add '$MediaIoMarketplaceSource'" "" "marketplace is registered"
+  invoke_checked_step "Add Media.io marketplace (Claude)" "add_claude_marketplace" "" "marketplace is registered"
   invoke_checked_step "Refresh Media.io marketplace (Claude)" "claude plugin marketplace update media-io" "" "marketplace is refreshed"
   invoke_checked_step "Verify marketplace visibility (Claude)" "warn_if_claude_marketplace_not_visible" "" "Marketplace lookup finished"
   invoke_checked_step "Install Claude Code plugin" "claude plugin install '$MediaIoClaudePluginId' -s user -y && claude_plugin_installed=1" "" "Claude Code plugin install completed"
