@@ -1,6 +1,6 @@
 #!/bin/sh
 # Media.io setup script for macOS.
-# setup-mediaio.sh script version: 0.1.10
+# setup-mediaio.sh script version: 0.1.11
 # Installs the Media.io CLI, Codex plugin, and direct skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
@@ -25,7 +25,7 @@ failure_count=0
 warning_count=0
 failures=
 warnings=
-SCRIPT_VERSION="0.1.10"
+SCRIPT_VERSION="0.1.11"
 MediaIoPackageName=${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}
 MediaIoMarketplaceSource=${MEDIAIO_MARKETPLACE_SOURCE:-media-io/plugin}
 MediaIoClaudePluginId=${MEDIAIO_CLAUDE_PLUGIN_ID:-media-io@media-io}
