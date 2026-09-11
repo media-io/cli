@@ -1,5 +1,5 @@
 # Media.io setup script for Windows.
-# setup-mediaio.ps1 script version: 0.1.8
+# setup-mediaio.ps1 script version: 0.1.9
 # Installs the Media.io CLI, Codex plugin, and direct skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
@@ -12,7 +12,7 @@
 #   MEDIAIO_NPM_PACKAGE      — npm package name for the CLI      (default: @mediaio/cli)
 #   MEDIAIO_NPM_REGISTRY     — npm registry URL                  (default: https://registry.npmjs.org)
 #   MEDIAIO_RELEASE_REPO     — GitHub repo for release assets    (default: media-io/cli)
-#   MEDIAIO_SKILL_REPO       — GitHub repo for skill source       (default: media-io/plugin)
+#   MEDIAIO_SKILL_REPO       — GitHub repo for skill source       (default: media-io/skills)
 #   MEDIAIO_SKILL_SOURCE     — local or remote skill source path
 #
 [CmdletBinding()]
@@ -25,7 +25,7 @@ $ErrorActionPreference = "Stop"
 $script:StepIndex = 0
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:Warnings = New-Object System.Collections.Generic.List[string]
-$script:ScriptVersion = "0.1.8"
+$script:ScriptVersion = "0.1.9"
 $script:ResolvedClaudeMarketplaceName = $null
 $script:UseCodexPersonalMarketplaceFallback = $false
 $script:CodexPersonalMarketplaceFallbackReason = $null
@@ -49,7 +49,7 @@ $MediaIoNpmRegistry = if ($env:MEDIAIO_NPM_REGISTRY) { $env:MEDIAIO_NPM_REGISTRY
 $MediaIoReleaseRepo = if ($env:MEDIAIO_RELEASE_REPO) { $env:MEDIAIO_RELEASE_REPO } else { "media-io/cli" }
 $MediaIoReleaseBaseUrl = if ($env:MEDIAIO_RELEASE_BASE_URL) { $env:MEDIAIO_RELEASE_BASE_URL.TrimEnd('/') } else { "https://github.com/$MediaIoReleaseRepo/releases/download" }
 $MediaIoVersion = if ($env:MEDIAIO_VERSION) { $env:MEDIAIO_VERSION } else { "latest" }
-$MediaIoSkillRepo = if ($env:MEDIAIO_SKILL_REPO) { $env:MEDIAIO_SKILL_REPO } else { "media-io/plugin" }
+$MediaIoSkillRepo = if ($env:MEDIAIO_SKILL_REPO) { $env:MEDIAIO_SKILL_REPO } else { "media-io/skills" }
 $MediaIoSkillSource = if ($env:MEDIAIO_SKILL_SOURCE) { $env:MEDIAIO_SKILL_SOURCE } else { "" }
 $MediaIoPluginArchiveUrl = if ($env:MEDIAIO_PLUGIN_ARCHIVE_URL) { $env:MEDIAIO_PLUGIN_ARCHIVE_URL } else { "https://github.com/media-io/plugin/archive/refs/heads/main.zip" }
 
@@ -763,7 +763,7 @@ function Get-LocalMediaIoSkillDirs {
 }
 
 function Get-DefaultMediaIoSkillNames {
-  return @("mediaio-generate", "mediaio-install")
+  return @("mediaio-generate")
 }
 
 function Get-MediaIoSkillNames {

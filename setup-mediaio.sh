@@ -1,6 +1,6 @@
 #!/bin/sh
 # Media.io setup script for macOS.
-# setup-mediaio.sh script version: 0.1.8
+# setup-mediaio.sh script version: 0.1.9
 # Installs the Media.io CLI, Codex plugin, and direct skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
@@ -13,7 +13,7 @@
 #   MEDIAIO_NPM_PACKAGE      — npm package name for the CLI      (default: @mediaio/cli)
 #   MEDIAIO_NPM_REGISTRY     — npm registry URL                  (default: https://registry.npmjs.org)
 #   MEDIAIO_RELEASE_REPO     — GitHub repo for release assets    (default: media-io/cli)
-#   MEDIAIO_SKILL_REPO       — GitHub repo for skill source       (default: media-io/plugin)
+#   MEDIAIO_SKILL_REPO       — GitHub repo for skill source       (default: media-io/skills)
 #   MEDIAIO_SKILL_SOURCE     — local or remote skill source path
 #
 set -eu
@@ -25,7 +25,7 @@ failure_count=0
 warning_count=0
 failures=
 warnings=
-SCRIPT_VERSION="0.1.8"
+SCRIPT_VERSION="0.1.9"
 MediaIoPackageName=${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}
 MediaIoMarketplaceSource=${MEDIAIO_MARKETPLACE_SOURCE:-media-io/plugin}
 MediaIoClaudePluginId=${MEDIAIO_CLAUDE_PLUGIN_ID:-media-io@media-io}
@@ -39,7 +39,7 @@ MediaIoReleaseApiUrl=${MEDIAIO_RELEASE_API_URL:-"https://api.github.com/repos/$M
 MediaIoVersion=${MEDIAIO_VERSION:-latest}
 MediaIoBinaryUrl=${MEDIAIO_BINARY_URL:-}
 MediaIoChecksumUrl=${MEDIAIO_CHECKSUM_URL:-}
-MediaIoSkillRepo=${MEDIAIO_SKILL_REPO:-media-io/plugin}
+MediaIoSkillRepo=${MEDIAIO_SKILL_REPO:-media-io/skills}
 MediaIoPluginArchiveUrl=${MEDIAIO_PLUGIN_ARCHIVE_URL:-https://github.com/media-io/plugin/archive/refs/heads/main.zip}
 MediaIoNodeInstallRoot=${MEDIAIO_NODE_INSTALL_DIR:-"$HOME/.local/share/mediaio/node"}
 MediaIoNodeCurrentDir=$MediaIoNodeInstallRoot/current
@@ -475,7 +475,7 @@ get_local_mediaio_plugin_root() {
 }
 
 get_default_mediaio_skill_names() {
-  printf '%s\n' mediaio-generate mediaio-install
+  printf '%s\n' mediaio-generate
 }
 
 get_mediaio_plugin_source_root() {
