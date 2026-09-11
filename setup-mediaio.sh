@@ -1,6 +1,6 @@
 #!/bin/sh
 # Media.io setup script for macOS.
-# setup-mediaio.sh script version: 0.1.11
+# setup-mediaio.sh script version: 0.1.12
 # Installs the Media.io CLI, Codex plugin, and direct skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
@@ -25,7 +25,7 @@ failure_count=0
 warning_count=0
 failures=
 warnings=
-SCRIPT_VERSION="0.1.11"
+SCRIPT_VERSION="0.1.12"
 MediaIoPackageName=${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}
 MediaIoMarketplaceSource=${MEDIAIO_MARKETPLACE_SOURCE:-media-io/plugin}
 MediaIoClaudePluginId=${MEDIAIO_CLAUDE_PLUGIN_ID:-media-io@media-io}
@@ -34,8 +34,8 @@ MediaIoCodexMarketplaceName=${MEDIAIO_CODEX_MARKETPLACE_NAME:-media-io}
 MediaIoInstallDir=${MEDIAIO_INSTALL_DIR:-"$HOME/.local/bin"}
 MediaIoNpmRegistry=${MEDIAIO_NPM_REGISTRY:-https://registry.npmjs.org}
 MediaIoReleaseRepo=${MEDIAIO_RELEASE_REPO:-media-io/cli}
-MediaIoReleaseBaseUrl=${MEDIAIO_RELEASE_BASE_URL:-"https://github.com/$MediaIoReleaseRepo/releases/download"}
-MediaIoReleaseApiUrl=${MEDIAIO_RELEASE_API_URL:-"https://api.github.com/repos/$MediaIoReleaseRepo/releases/latest"}
+MediaIoReleaseWebBase=${MEDIAIO_RELEASE_WEB_BASE:-"https://github.com/$MediaIoReleaseRepo"}
+MediaIoReleaseBaseUrl=${MEDIAIO_RELEASE_BASE_URL:-"$MediaIoReleaseWebBase/releases/download"}
 MediaIoVersion=${MEDIAIO_VERSION:-latest}
 MediaIoBinaryUrl=${MEDIAIO_BINARY_URL:-}
 MediaIoChecksumUrl=${MEDIAIO_CHECKSUM_URL:-}
@@ -350,15 +350,24 @@ ensure_node_and_npm() {
   return 1
 }
 
-resolve_mediaio_version_from_github_latest() {
+resolve_mediaio_version_from_release_redirect() {
   if [ "$MediaIoVersion" != latest ]; then
     printf '%s\n' "$MediaIoVersion"
     return 0
   fi
 
-  release_json=$(curl -fsSL -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$MediaIoReleaseApiUrl") || return 1
-  tag_name=$(printf '%s\n' "$release_json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-  [ -n "$tag_name" ] || return 1
+  release_web_base=${MediaIoReleaseWebBase%/}
+  latest_url=$(curl -fsSIL -o /dev/null -w '%{url_effective}' "$release_web_base/releases/latest") || return 1
+  release_tag_prefix=$release_web_base/releases/tag/
+  case "$latest_url" in
+    "$release_tag_prefix"*) tag_name=${latest_url#"$release_tag_prefix"} ;;
+    *) return 1 ;;
+  esac
+  tag_name=${tag_name%%\?*}
+  tag_name=${tag_name%%#*}
+  case "$tag_name" in
+    ''|*/*) return 1 ;;
+  esac
   MediaIoVersion=${tag_name#v}
   printf '%s\n' "$MediaIoVersion"
 }
@@ -415,7 +424,7 @@ assert_mediaio_checksum_if_available() {
 }
 
 install_mediaio_cli_from_release() {
-  release_version=$(resolve_mediaio_version_from_github_latest) || return 1
+  release_version=$(resolve_mediaio_version_from_release_redirect) || return 1
   MediaIoVersion=$release_version
   archive_name=$(get_mediaio_archive_name)
   download_url=$MediaIoBinaryUrl
