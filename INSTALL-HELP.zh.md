@@ -110,11 +110,6 @@ npm install -g @mediaio/cli@latest
 安装器只支持 `darwin | linux | windows` × `amd64 | arm64`。报 `unsupported platform` 时确认用户系统在
 支持范围内；`win32` 会映射为 `windows`。
 
-### 2.5 命令冲突：`mi` 用不了
-
-CLI 同时提供 `mediaio` 与 `mi` 两个等价命令。若用户机器已有别的 `mi` 命令导致 PATH 冲突，**统一改用
-`mediaio`** 即可，功能完全一致。
-
 ---
 
 ## 3. 插件 / Skills 安装失败
