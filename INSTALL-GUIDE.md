@@ -137,11 +137,6 @@ corporate network and retry.
 The installer only supports `darwin | linux | windows` × `amd64 | arm64`. On `unsupported platform`,
 confirm the user's system is in range; `win32` maps to `windows`.
 
-### 2.5 Command conflict: `mi` doesn't work
-
-The CLI provides two equivalent commands, `mediaio` and `mi`. If the user's machine already has another
-`mi` command causing a PATH conflict, **just use `mediaio`** — it is functionally identical.
-
 ---
 
 ## 3. Plugin / Skills install failures
