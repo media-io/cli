@@ -77,6 +77,7 @@ TARBALL_PATH="$OUTPUT_DIR/$TARBALL_NAME"
 [[ -f "$TARBALL_PATH" ]] || fail "未找到 npm pack 产物：$TARBALL_PATH"
 
 tar -tzf "$TARBALL_PATH" | grep -qx 'package/package.json' || fail "npm tarball 缺少 package/package.json"
+tar -tzf "$TARBALL_PATH" | grep -qx 'package/LICENSE' || fail "npm tarball 缺少 package/LICENSE"
 tar -tzf "$TARBALL_PATH" | grep -qx 'package/install.js' || fail "npm tarball 缺少 package/install.js"
 tar -tzf "$TARBALL_PATH" | grep -qx 'package/bin/mediaio.js' || fail "npm tarball 缺少 package/bin/mediaio.js"
 tar -tzf "$TARBALL_PATH" | grep -qx 'package/bin/run.js' || fail "npm tarball 缺少 package/bin/run.js"
@@ -85,6 +86,12 @@ for bin_entry in package/bin/mediaio.js; do
   tar -tvzf "$TARBALL_PATH" "$bin_entry" | awk '$1 == "-rwxr-xr-x" { found = 1 } END { exit !found }' || \
     fail "npm tarball 中 $bin_entry 必须具有 755 可执行权限"
 done
+
+# 内部技术文档（*.tech.md）一律不随 npm 包发布；package.json 的 files 白名单已排除，
+# 这里再做一次断言，避免白名单被放宽后静默外泄。
+if tar -tzf "$TARBALL_PATH" | grep -q '\.tech\.md$'; then
+  fail "npm tarball 不得包含 *.tech.md 内部技术文档"
+fi
 
 CLI_COMMIT="$(git rev-parse HEAD)"
 TARBALL_SHA256="$(sha256sum "$TARBALL_PATH" | awk '{print $1}')"

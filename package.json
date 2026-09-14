@@ -11,6 +11,7 @@
   "files": [
     "bin/",
     "install.js",
+    "LICENSE",
     "README.md"
   ],
   "engines": {
