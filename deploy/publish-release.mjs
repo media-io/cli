@@ -609,7 +609,6 @@ async function publishNpm(releaseVersion, releaseDistTag, githubTag, apiBase, gi
         npmRegistryPropagationDelaysMs,
       );
       run(join(smokeDirectory, "node_modules", ".bin", "mediaio"), ["--help"], { env: npmEnv });
-      run(join(smokeDirectory, "node_modules", ".bin", "mi"), ["--help"], { env: npmEnv });
     } finally {
       rmSync(smokeDirectory, { recursive: true, force: true });
     }

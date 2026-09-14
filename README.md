@@ -16,7 +16,7 @@ npm install -g @mediaio/cli
     ↓ postinstall
 install.js downloads vendor/mediaio (or vendor/mediaio.exe on Windows)
     ↓
-mediaio / mi command → JavaScript launcher → Go binary
+mediaio command → JavaScript launcher → Go binary
     ↓
 Media.io public API
 ```
@@ -43,16 +43,12 @@ After installation:
 
 ```bash
 mediaio --help
-mi --help
 mediaio auth login
 mediaio generate list
 ```
 
-The CLI exposes both `mediaio` and `mi` as equivalent commands. They use the
-same launcher, binary, configuration, and credentials. `mediaio` is the
-canonical command: all documentation, automation, and troubleshooting guidance
-should use it. `mi` is only a convenience alias for terminal input. If a user
-machine already has another `mi` command in `PATH`, continue using `mediaio`.
+The CLI registers a single command, `mediaio`. It is the canonical command: all
+documentation, automation, and troubleshooting guidance should use it.
 
 ## For Claude Code
 
@@ -151,7 +147,6 @@ cp ../media-plugin-bin/dist/mediaio vendor/mediaio
 chmod +x vendor/mediaio
 
 node bin/mediaio.js --help
-node bin/mi.js --help
 node bin/mediaio.js generate list
 ```
 

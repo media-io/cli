@@ -3,8 +3,7 @@
   "version": "0.3.1",
   "description": "Media.io AI CLI — generate images and videos from the terminal.",
   "bin": {
-    "mediaio": "bin/mediaio.js",
-    "mi": "bin/mi.js"
+    "mediaio": "bin/mediaio.js"
   },
   "scripts": {
     "postinstall": "node install.js"

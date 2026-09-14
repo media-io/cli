@@ -79,10 +79,9 @@ TARBALL_PATH="$OUTPUT_DIR/$TARBALL_NAME"
 tar -tzf "$TARBALL_PATH" | grep -qx 'package/package.json' || fail "npm tarball 缺少 package/package.json"
 tar -tzf "$TARBALL_PATH" | grep -qx 'package/install.js' || fail "npm tarball 缺少 package/install.js"
 tar -tzf "$TARBALL_PATH" | grep -qx 'package/bin/mediaio.js' || fail "npm tarball 缺少 package/bin/mediaio.js"
-tar -tzf "$TARBALL_PATH" | grep -qx 'package/bin/mi.js' || fail "npm tarball 缺少 package/bin/mi.js"
 tar -tzf "$TARBALL_PATH" | grep -qx 'package/bin/run.js' || fail "npm tarball 缺少 package/bin/run.js"
 
-for bin_entry in package/bin/mediaio.js package/bin/mi.js; do
+for bin_entry in package/bin/mediaio.js; do
   tar -tvzf "$TARBALL_PATH" "$bin_entry" | awk '$1 == "-rwxr-xr-x" { found = 1 } END { exit !found }' || \
     fail "npm tarball 中 $bin_entry 必须具有 755 可执行权限"
 done
