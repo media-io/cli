@@ -1,5 +1,5 @@
 # Media.io setup script for Windows.
-# setup-mediaio.ps1 script version: 0.1.12
+# setup-mediaio.ps1 script version: 0.1.13
 # Installs the Media.io CLI, Codex plugin, and direct skills in one pass.
 # CLI prefers npm and falls back to a release archive; direct skills are installed with npx only when plugin install is unavailable.
 #
@@ -34,6 +34,7 @@ $script:ResolvedCodexMarketplaceName = $null
 $script:ResolvedMediaIoSkillSource = $null
 $script:ClaudeAvailable = $false
 $script:CodexAvailable = $false
+$script:CursorAvailable = $false
 $script:ClaudePluginInstalled = $false
 $script:CodexPluginInstalled = $false
 $script:ClaudePluginReady = $false
@@ -868,6 +869,10 @@ function Get-MediaIoSkillTargetBases {
   if ($script:ClaudeAvailable -and -not $script:ClaudePluginReady) {
     $targets += [pscustomobject]@{ Agent = "claude-code"; BaseDir = (Join-Path $HOME ".claude\skills") }
   }
+  if ($script:CursorAvailable) {
+    # The skills CLI and Cursor both use ~/.agents/skills as a global skills root.
+    $targets += [pscustomobject]@{ Agent = "cursor"; BaseDir = (Join-Path $HOME ".agents\skills") }
+  }
   return @($targets)
 }
 
@@ -875,7 +880,7 @@ function Test-MediaIoSkillsInstalled {
   $requiredPaths = @()
   $targets = @(Get-MediaIoSkillTargetBases)
   if ($targets.Count -eq 0) {
-    Add-Warning "Neither Codex nor Claude Code is available; no Media.io skills target was verified."
+    Add-Warning "Neither Codex, Claude Code, nor Cursor is available; no Media.io skills target was verified."
     return
   }
 
@@ -903,7 +908,7 @@ function Invoke-MediaIoSkillInstall {
   Invoke-CheckedStep "Install Media.io skills" {
     $targets = @(Get-MediaIoSkillTargetBases)
     if ($targets.Count -eq 0) {
-      throw "Neither Codex nor Claude Code is available; cannot run targeted npx skills install."
+      throw "Neither Codex, Claude Code, nor Cursor is available; cannot run targeted npx skills install."
     }
     if (-not (Test-CommandAvailable "npx")) {
       Install-MediaIoSkillsManually -Targets $targets
@@ -911,6 +916,9 @@ function Invoke-MediaIoSkillInstall {
     }
     Ensure-NodeAndNpm
     foreach ($target in $targets) {
+      # The skills CLI may leave global skills in ~/.agents/skills without
+      # linking them into an agent-specific directory unless it already exists.
+      New-Item -ItemType Directory -Path $target.BaseDir -Force | Out-Null
       Write-Host "  Installing Media.io skills for $($target.Agent) with npx" -ForegroundColor DarkGray
       & cmd /c "npx --yes skills add $MediaIoSkillRepo -g -a $($target.Agent) --skill * -y"
       if ($LASTEXITCODE -ne 0) {
@@ -1276,11 +1284,14 @@ function Get-ClaudeMarketplaceIds {
 
 Write-Host "Media.io setup script" -ForegroundColor White
 Write-Host "Script version: $script:ScriptVersion" -ForegroundColor DarkGray
-Write-Host "This script installs the Media.io CLI, Codex plugin, and skills. Claude Code skills are installed directly with npx; the CLI prefers npm and falls back to a release archive." -ForegroundColor DarkGray
+Write-Host "This script installs the Media.io CLI, Codex plugin, and skills. Claude Code and Cursor skills are installed directly; the CLI prefers npm and falls back to a release archive." -ForegroundColor DarkGray
 
 Write-Step "Prepare Claude Code skills target"
 $script:ClaudeAvailable = $true
 Write-Host "  Claude Code CLI is not required; skills will be installed directly for claude-code." -ForegroundColor DarkGray
+Write-Step "Prepare Cursor skills target"
+$script:CursorAvailable = $true
+Write-Host "  Cursor CLI is not required; skills will be installed directly for cursor." -ForegroundColor DarkGray
 
 Invoke-OptionalHostDetection "Preflight: locate codex" "codex" {
   param([bool]$Available)
@@ -1301,8 +1312,8 @@ Invoke-CheckedStep "Run Media.io doctor" {
 } -SuccessMessage "local Media.io checks passed"
 
 if ($script:ClaudeAvailable) {
-  Write-Step "Use direct Media.io skills for Claude Code"
-  Write-Host "  Claude Code plugin installation is skipped; skills will be installed with npx for claude-code only." -ForegroundColor DarkGray
+  Write-Step "Use direct Media.io skills for Claude Code and Cursor"
+  Write-Host "  Claude Code plugin installation is skipped; skills will be installed directly for claude-code and cursor." -ForegroundColor DarkGray
 }
 
 if ($script:CodexAvailable) {
@@ -1430,6 +1441,7 @@ try {
     foreach ($skillName in @(Get-MediaIoSkillNames)) {
       $skillPaths.Add((Join-Path $HOME ".codex\skills\$skillName"))
       $skillPaths.Add((Join-Path $HOME ".claude\skills\$skillName"))
+      $skillPaths.Add((Join-Path $HOME ".agents\skills\$skillName"))
     }
     if (@($skillPaths | Where-Object { Test-Path $_ }).Count -gt 0) {
       Add-Warning "Residual direct Media.io skill directories still exist alongside the plugin install."
