@@ -25,7 +25,7 @@ failure_count=0
 warning_count=0
 failures=
 warnings=
-SCRIPT_VERSION="0.1.12"
+SCRIPT_VERSION="0.1.13"
 MediaIoPackageName=${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}
 MediaIoMarketplaceSource=${MEDIAIO_MARKETPLACE_SOURCE:-media-io/plugin}
 MediaIoClaudePluginId=${MEDIAIO_CLAUDE_PLUGIN_ID:-media-io@media-io}
@@ -47,6 +47,7 @@ MediaIoNodeBinDir=$MediaIoNodeCurrentDir/bin
 MediaIoNodeReady=0
 claude_available=0
 codex_available=0
+cursor_available=0
 claude_plugin_installed=0
 codex_plugin_installed=0
 claude_plugin_ready=0
@@ -560,11 +561,17 @@ get_skill_target_bases() {
   if [ "$claude_available" -eq 1 ] && [ "$claude_plugin_ready" -eq 0 ]; then
     printf '%s\n' "$HOME/.claude/skills"
   fi
+  if [ "$cursor_available" -eq 1 ]; then
+    # The skills CLI uses ~/.agents/skills as the canonical global directory
+    # for Cursor; Cursor also discovers skills from this location.
+    printf '%s\n' "$HOME/.agents/skills"
+  fi
 }
 
 get_all_skill_target_bases() {
   [ "$codex_available" -eq 1 ] && printf '%s\n' "$HOME/.codex/skills"
   [ "$claude_available" -eq 1 ] && printf '%s\n' "$HOME/.claude/skills"
+  [ "$cursor_available" -eq 1 ] && printf '%s\n' "$HOME/.agents/skills"
 }
 
 get_skill_target_agents() {
@@ -574,6 +581,7 @@ get_skill_target_agents() {
   if [ "$claude_available" -eq 1 ] && [ "$claude_plugin_ready" -eq 0 ]; then
     printf '%s\n' claude-code
   fi
+  [ "$cursor_available" -eq 1 ] && printf '%s\n' cursor
 }
 
 test_mediaio_skill_set_in_base() {
@@ -917,6 +925,15 @@ install_skill_files() {
   ensure_node_and_npm || return 1
   while IFS= read -r agent; do
     [ -n "$agent" ] || continue
+    case "$agent" in
+      codex) target_base=$HOME/.codex/skills ;;
+      claude-code) target_base=$HOME/.claude/skills ;;
+      cursor) target_base=$HOME/.agents/skills ;;
+      *) return 1 ;;
+    esac
+    # The skills CLI may leave global skills in ~/.agents/skills without
+    # linking them into an agent-specific directory unless that directory exists.
+    mkdir -p "$target_base" || return 1
     printf '  Installing Media.io skills for %s with npx\n' "$agent"
     npx --yes skills add "$MediaIoSkillRepo" -g -a "$agent" --skill '*' -y || return 1
   done <<EOF
@@ -969,6 +986,7 @@ install_skill_files_manually() {
     case "$agent" in
       codex) base_dir=$HOME/.codex/skills ;;
       claude-code) base_dir=$HOME/.claude/skills ;;
+      cursor) base_dir=$HOME/.agents/skills ;;
       *) rm -rf "$temp_dir"; return 1 ;;
     esac
     mkdir -p "$base_dir" || { rm -rf "$temp_dir"; return 1; }
@@ -1031,18 +1049,21 @@ print_list() {
 
 printf '%s\n' "Media.io setup script"
 printf 'Script version: %s\n' "$SCRIPT_VERSION"
-printf '%s\n' "This script installs the Media.io CLI, Codex plugin, and skills. Claude Code skills are installed directly with npx; the CLI prefers npm and falls back to a release archive."
+printf '%s\n' "This script installs the Media.io CLI, Codex plugin, and skills. Claude Code and Cursor skills are installed directly; the CLI prefers npm and falls back to a release archive."
 
 write_step "Prepare Claude Code skills target"
 claude_available=1
 printf '%s\n' "  Claude Code CLI is not required; skills will be installed directly for claude-code."
+write_step "Prepare Cursor skills target"
+cursor_available=1
+printf '%s\n' "  Cursor CLI is not required; skills will be installed directly for cursor."
 check_optional_host "Preflight: locate codex" codex codex_available
 invoke_optional_fallback_step "Install Media.io CLI" "ensure_node_and_npm && install_mediaio_cli_from_npm_package" "install_mediaio_cli_from_release" "verify_mediaio_cli_available" "Media.io CLI is installed"
 invoke_checked_step "Run Media.io doctor" "mediaio doctor" "" "local Media.io checks passed"
 
 if [ "$claude_available" -eq 1 ]; then
-  write_step "Use direct Media.io skills for Claude Code"
-  printf '%s\n' "  Claude Code plugin installation is skipped; skills will be installed with npx for claude-code only."
+  write_step "Use direct Media.io skills for Claude Code and Cursor"
+  printf '%s\n' "  Claude Code plugin installation is skipped; skills will be installed directly for claude-code and cursor."
 fi
 
 if [ "$codex_available" -eq 1 ]; then
