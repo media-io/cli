@@ -32,20 +32,15 @@ test("验证已发布npm包，不执行postinstall，拒绝integrity与版本不
   assert.throws(() => verifyNpmArchive(content, "0.5.2", integrity), /version/);
 }));
 
-test("CLI/BIN清单保留旧字段且npm依赖GitHubRelease，不归档BIN源码", () => withPackage(({ root, directory }) => {
+test("CLI npm独立归档不读取BIN，不关联GitHubRelease且保留真实npm校验", () => withPackage(({ root, directory }) => {
   execFileSync("git", ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgSign=false", "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "fixture"], { cwd: directory });
   const binaryDirectory = join(root, "binary-assets");
   const output = join(root, "archive");
   mkdirSync(binaryDirectory);
-  const assets = ["darwin_amd64", "darwin_arm64", "linux_amd64", "linux_arm64", "windows_amd64", "windows_arm64"].map(target => {
-    const name = `mediaio_0.5.1_${target}.tar.gz`;
-    writeFileSync(join(binaryDirectory, name), `binary fixture ${target}`);
-    return { name, sha256: createHash("sha256").update(readFileSync(join(binaryDirectory, name))).digest("hex") };
-  });
-  writeFileSync(join(binaryDirectory, "checksums.txt"), assets.map(asset => `${asset.sha256}  ${asset.name}\n`).join(""));
-  writeFileSync(join(binaryDirectory, "bin-build.json"), JSON.stringify({ release_version: "0.5.1", bin_commit: "b".repeat(40), build_number: "123", built_at: "2026-10-15T00:00:00Z", go_version: "fixture", assets }));
+  writeFileSync(join(binaryDirectory, "checksums.txt"), "invalid old BIN checksums");
+  writeFileSync(join(binaryDirectory, "bin-build.json"), JSON.stringify({ release_version: "0.5.0-ci.150", build_number: "150" }));
   writeFileSync(join(binaryDirectory, "main.go"), "must not be archived");
-  const values = { RELEASE_VERSION: "0.5.1", BK_CI_BUILD_NUM: "123", RELEASE_DIST_TAG: "latest", RELEASE_WITH_CI_SUFFIX: "false", BIN_ARTIFACT_DIR: binaryDirectory, ARTIFACT_ARCHIVE_PATH: "./fixture/123" };
+  const values = { RELEASE_VERSION: "0.5.1", BK_CI_BUILD_NUM: "160", RELEASE_DIST_TAG: "latest", RELEASE_WITH_CI_SUFFIX: "false", BIN_ARTIFACT_DIR: "", ARTIFACT_ARCHIVE_PATH: "./fixture/160" };
   const previous = Object.fromEntries(Object.keys(values).map(name => [name, process.env[name]]));
   Object.assign(process.env, values);
   try {
@@ -53,18 +48,21 @@ test("CLI/BIN清单保留旧字段且npm依赖GitHubRelease，不归档BIN源码
     const manifest = JSON.parse(readFileSync(join(output, "release-manifest.json"), "utf8"));
     assert.equal(manifest.release_version, "0.5.1");
     assert.equal(manifest.cli.package, "@mediaio/cli");
-    assert.equal(manifest.bin.commit, "b".repeat(40));
-    assert.equal(manifest.assets.length, 6);
-    assert.equal(manifest.units[1].channel, "npm");
-    assert.deepEqual(manifest.units[1].depends_on, ["github-release"]);
-    assert.equal(manifest.units[1].files[0].name, "mediaio-cli-0.5.1.tgz");
-    assert.ok(result.file.endsWith(manifest.units[1].files[0].name));
+    for (const field of ["bin", "assets", "github_tag"]) assert.equal(Object.hasOwn(manifest, field), false);
+    assert.ok(Number.isFinite(Date.parse(manifest.built_at)));
+    assert.equal(manifest.units.length, 1);
+    assert.equal(manifest.units[0].channel, "npm");
+    assert.deepEqual(manifest.units[0].depends_on, []);
+    assert.equal(manifest.units[0].files[0].name, "mediaio-cli-0.5.1.tgz");
+    assert.ok(result.file.endsWith(manifest.units[0].files[0].name));
     const members = execFileSync("tar", ["-tzf", result.archiveFile], { encoding: "utf8" }).trim().split("\n");
-    assert.ok(members.includes("release-manifest.json"));
-    assert.ok(members.includes("cli-build.json"));
-    assert.ok(members.includes("mediaio-cli-0.5.1.tgz"));
-    assert.equal(members.length, 11);
-    assert.ok(!members.some(name => name.includes("main.go")));
+    assert.deepEqual(members.sort(), ["mediaio-cli-0.5.1.tgz", "cli-build.json", "release-manifest.json", "artifact-checksums.txt"].sort());
+    const metadata = JSON.parse(readFileSync(join(output, "cli-build.json"), "utf8"));
+    assert.ok(verifyNpmArchive(readFileSync(result.file), "0.5.1", metadata.pack_integrity).includes("package/bin/mediaio.js"));
+    for (const line of readFileSync(join(output, "artifact-checksums.txt"), "utf8").trim().split("\n")) {
+      const [, expected, name] = /^([a-f0-9]{64})  (.+)$/.exec(line);
+      assert.equal(createHash("sha256").update(readFileSync(join(output, name))).digest("hex"), expected);
+    }
     assert.throws(() => readFileSync(join(output, "main.go")), /ENOENT/);
     mkdirSync(join(directory, "deploy"));
     cpSync(new URL("./package-pipeline-artifact.mjs", import.meta.url), join(directory, "deploy/package-pipeline-artifact.mjs"));
@@ -72,26 +70,36 @@ test("CLI/BIN清单保留旧字段且npm依赖GitHubRelease，不归档BIN源码
     mkdirSync(workspace);
     const pipelineEnv = { ...process.env, WORKSPACE: workspace, MODULE_NAME: "media-plugin-cli-public", ARTIFACT_ARCHIVE_PATH: "ignored" };
     const pipelineFiles = [];
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (const binaryInput of ["", binaryDirectory, join(root, "missing-binary-assets")]) {
       const pipeline = spawnSync(process.execPath, [join(directory, "deploy/package-pipeline-artifact.mjs"), "--pipeline"], {
-        cwd: root, env: pipelineEnv, encoding: "utf8",
+        cwd: root, env: { ...pipelineEnv, BIN_ARTIFACT_DIR: binaryInput }, encoding: "utf8",
       });
       assert.equal(pipeline.status, 0, pipeline.stderr);
       assert.equal(pipeline.stderr, "");
       const filename = pipeline.stdout.trim();
       assert.equal(pipeline.stdout, `${filename}\n`);
       assert.ok(!filename.startsWith("/") && !filename.includes("..") && !filename.includes("\n"));
-      assert.ok(filename.endsWith("/mediaio-cli-archive_0.5.1_123.tar.gz"));
+      assert.ok(filename.endsWith("/mediaio-cli-archive_0.5.1_160.tar.gz"));
       assert.ok(!pipelineFiles.includes(filename));
       const pipelineManifest = JSON.parse(execFileSync("tar", ["-xOzf", join(workspace, filename), "release-manifest.json"], { encoding: "utf8" }));
-      assert.equal(pipelineManifest.archive_path, "./media-plugin-cli-public/123/plugin-cli-npm");
-      assert.equal(pipelineManifest.assets.length, 6);
-      assert.equal(pipelineManifest.units[1].files[0].name, "mediaio-cli-0.5.1.tgz");
+      assert.equal(pipelineManifest.archive_path, "./media-plugin-cli-public/160/plugin-cli-npm");
+      assert.equal(Object.hasOwn(pipelineManifest, "bin"), false);
+      assert.equal(pipelineManifest.units.length, 1);
+      assert.equal(pipelineManifest.units[0].files[0].name, "mediaio-cli-0.5.1.tgz");
       pipelineFiles.push(filename);
     }
     for (const filename of pipelineFiles) assert.ok(existsSync(join(workspace, filename)));
+    const ci = spawnSync(process.execPath, [join(directory, "deploy/package-pipeline-artifact.mjs"), "--pipeline"], {
+      cwd: root, env: { ...pipelineEnv, RELEASE_VERSION: "0.5.1-ci.160", RELEASE_WITH_CI_SUFFIX: "true", BIN_ARTIFACT_DIR: binaryDirectory }, encoding: "utf8",
+    });
+    assert.equal(ci.status, 0, ci.stderr);
+    assert.ok(ci.stdout.trim().endsWith("/mediaio-cli-archive_0.5.1-ci.160_160.tar.gz"));
+    const ciManifest = JSON.parse(execFileSync("tar", ["-xOzf", join(workspace, ci.stdout.trim()), "release-manifest.json"], { encoding: "utf8" }));
+    assert.equal(ciManifest.release_version, "0.5.1-ci.160");
+    assert.equal(ciManifest.release_with_ci_suffix, true);
+    assert.deepEqual(ciManifest.units[0].depends_on, []);
     for (const invalidEnv of [
-      { WORKSPACE: "" }, { MODULE_NAME: "../escape" }, { BK_CI_BUILD_NUM: "../escape" }, { WORKSPACE: directory }, { BIN_ARTIFACT_DIR: "" },
+      { WORKSPACE: "" }, { MODULE_NAME: "../escape" }, { BK_CI_BUILD_NUM: "../escape" }, { WORKSPACE: directory }, { RELEASE_VERSION: "0.5.1-ci.150", RELEASE_WITH_CI_SUFFIX: "true" },
     ]) {
       const invalid = spawnSync(process.execPath, [join(directory, "deploy/package-pipeline-artifact.mjs"), "--pipeline"], {
         cwd: root, env: { ...pipelineEnv, ...invalidEnv }, encoding: "utf8",

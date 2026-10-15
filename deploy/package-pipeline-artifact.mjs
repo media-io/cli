@@ -140,31 +140,6 @@ export function packagePipelineArtifact(outputDirectory, sourceDirectory = packa
   if (!["true", "false"].includes(withCiSuffix)) throw new Error("RELEASE_WITH_CI_SUFFIX must be true or false.");
   const archivePath = process.env.ARTIFACT_ARCHIVE_PATH;
   if (!archivePath || /[\x00-\x1f]|:\/\/|\.\./.test(archivePath)) throw new Error("ARTIFACT_ARCHIVE_PATH must identify the internal archive directory.");
-  const binaryDirectory = resolve(process.env.BIN_ARTIFACT_DIR ?? "");
-  if (!process.env.BIN_ARTIFACT_DIR) throw new Error("BIN_ARTIFACT_DIR is required for the CLI/BIN release manifest.");
-  for (const name of ["bin-build.json", "checksums.txt"]) {
-    const entry = lstatSync(join(binaryDirectory, name));
-    if (!entry.isFile() || entry.isSymbolicLink() || entry.size > 1024 * 1024) throw new Error("BIN metadata must be a bounded regular file.");
-  }
-  const binBuild = JSON.parse(readFileSync(join(binaryDirectory, "bin-build.json"), "utf8"));
-  if (binBuild.release_version !== version) throw new Error("CLI and BIN artifact versions must match.");
-  const binaryNames = ["darwin_amd64", "darwin_arm64", "linux_amd64", "linux_arm64", "windows_amd64", "windows_arm64"].map(target => `mediaio_${version}_${target}.tar.gz`);
-  const originalChecksums = readFileSync(join(binaryDirectory, "checksums.txt"), "utf8");
-  const parsedChecksums = new Map(originalChecksums.trim().split("\n").map(line => {
-    const match = /^([a-f0-9]{64})\s+\*?([^\r\n]+)$/.exec(line);
-    if (!match) throw new Error("Invalid BIN checksum file.");
-    return [match[2], match[1]];
-  }));
-  if (parsedChecksums.size !== binaryNames.length || [...parsedChecksums.keys()].some(name => !binaryNames.includes(name))) {
-    throw new Error("BIN checksum list must contain exactly the six declared binary assets.");
-  }
-  const assets = binaryNames.map(name => {
-    const filepath = join(binaryDirectory, name);
-    if (!lstatSync(filepath).isFile() || lstatSync(filepath).isSymbolicLink()) throw new Error("BIN asset must be a regular file.");
-    const sha256 = createHash("sha256").update(readFileSync(filepath)).digest("hex");
-    if (parsedChecksums.get(name) !== sha256) throw new Error("BIN checksum mismatch.");
-    return { name, sha256 };
-  });
   const output = resolve(outputDirectory);
   const source = realpathSync(sourceDirectory);
   if (output === source || output.startsWith(`${source}${sep}`) || source.startsWith(`${output}${sep}`)) throw new Error("Artifact output must be outside the source checkout.");
@@ -188,30 +163,26 @@ export function packagePipelineArtifact(outputDirectory, sourceDirectory = packa
     };
     writeFileSync(join(work, "cli-build.json"), `${JSON.stringify(metadata, null, 2)}\n`);
     const buildMetadataHash = createHash("sha256").update(readFileSync(join(work, "cli-build.json"))).digest("hex");
-    const checksumsHash = createHash("sha256").update(originalChecksums).digest("hex");
     const releaseManifest = {
       schema_version: 1, product_line: "MI", plugin_pid: "mediaio-cli",
       base_version: baseVersion, release_version: version, release_dist_tag: releaseDistTag,
-      release_with_ci_suffix: withCiSuffix === "true", github_tag: `v${version}`, built_at: binBuild.built_at,
+      release_with_ci_suffix: withCiSuffix === "true", built_at: new Date().toISOString(),
       source: { repository: "media-plugin-cli", commit: sourceCommit }, archive_path: archivePath,
       cli: { commit: sourceCommit, package: packageName },
-      bin: { commit: binBuild.bin_commit, build_number: binBuild.build_number, built_at: binBuild.built_at, go_version: binBuild.go_version },
-      assets,
       units: [
-        { unit: "github-release", channel: "github-release", target: "media-io/cli", depends_on: [], unpack: false, files: [...assets, { name: "checksums.txt", sha256: checksumsHash }] },
-        { unit: "npm-package", channel: "npm", target: packageName, depends_on: ["github-release"], unpack: false, files: [{ name: packed.filename, sha256: packed.sha256 }] },
+        { unit: "npm-package", channel: "npm", target: packageName, depends_on: [], unpack: false, files: [{ name: packed.filename, sha256: packed.sha256 }] },
       ],
       support_files: [{ name: "cli-build.json", sha256: buildMetadataHash }],
     };
     writeFileSync(join(work, "release-manifest.json"), `${JSON.stringify(releaseManifest, null, 2)}\n`);
     const releaseManifestHash = createHash("sha256").update(readFileSync(join(work, "release-manifest.json"))).digest("hex");
-    const checksumLines = [...assets, { name: "checksums.txt", sha256: checksumsHash }, { name: packed.filename, sha256: packed.sha256 }, { name: "cli-build.json", sha256: buildMetadataHash }, { name: "release-manifest.json", sha256: releaseManifestHash }];
+    const checksumLines = [{ name: packed.filename, sha256: packed.sha256 }, { name: "cli-build.json", sha256: buildMetadataHash }, { name: "release-manifest.json", sha256: releaseManifestHash }];
     writeFileSync(join(work, "artifact-checksums.txt"), checksumLines.map(file => `${file.sha256}  ${file.name}\n`).join(""));
-    const names = [packed.filename, "cli-build.json", "release-manifest.json", "artifact-checksums.txt", ...binaryNames, "checksums.txt"];
+    const names = [packed.filename, "cli-build.json", "release-manifest.json", "artifact-checksums.txt"];
     for (const name of names) {
       if (existsSync(join(output, name))) throw new Error("Artifact metadata already exists; refusing to overwrite.");
     }
-    for (const name of names) copyFileSync(join(binaryNames.includes(name) || name === "checksums.txt" ? binaryDirectory : work, name), join(output, name), constants.COPYFILE_EXCL);
+    for (const name of names) copyFileSync(join(work, name), join(output, name), constants.COPYFILE_EXCL);
     const transport = join(work, "transport.tar.gz");
     execFileSync("tar", ["-czf", transport, "-C", output, ...names], { stdio: "pipe" });
     const archiveFile = join(output, `mediaio-cli-archive_${version}_${buildNumber}.tar.gz`);
