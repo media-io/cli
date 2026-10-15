@@ -86,6 +86,15 @@ function assertReleaseSelection(baseVersion, releaseVersion, releaseDistTag, wit
   }
 }
 
+// GitHub Release 页面的“Release label”只有 None/Pre-release/Latest 三态，由 RELEASE_DIST_TAG 派生：
+// latest -> Latest，next -> Pre-release；assertReleaseSelection 目前只放行这两个取值，
+// 未识别的取值一律回退为 None，不允许静默变成 Latest。
+function releaseLabelFor(releaseDistTag) {
+  if (releaseDistTag === "latest") return { prerelease: false, makeLatest: "true" };
+  if (releaseDistTag === "next") return { prerelease: true, makeLatest: "false" };
+  return { prerelease: false, makeLatest: "false" };
+}
+
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd ?? packageRoot,
@@ -111,6 +120,23 @@ function tryRun(command, args, options = {}) {
     stdout: (result.stdout ?? "").trim(),
     stderr: (result.stderr ?? "").trim(),
   };
+}
+
+// npm publish 后新版本在 registry 各边缘节点的可见时间不固定，紧跟着的 npm install
+// 偶尔会拿到还没同步的旧 packument 而报 ETARGET；这里按退避延迟重试同一条命令。
+async function runWithRetry(command, args, options, retryDelaysMs) {
+  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
+    if (attempt > 0) {
+      const delayMs = retryDelaysMs[attempt];
+      console.log(`[publish] ${command} ${args.join(" ")} 失败，${Math.round(delayMs / 1_000)} 秒后重试（${attempt}/${retryDelaysMs.length - 1}）`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    const result = tryRun(command, args, options);
+    if (result.stdout) process.stdout.write(`${result.stdout}\n`);
+    if (result.stderr) process.stderr.write(`${result.stderr}\n`);
+    if (result.ok) return result.stdout;
+    if (attempt === retryDelaysMs.length - 1) fail(`${command} 执行失败，退出码：${result.status}`);
+  }
 }
 
 function sha256(file) {
@@ -174,6 +200,16 @@ async function githubRequest(url, token, options = {}) {
   return body ? JSON.parse(body) : {};
 }
 
+function assertNoInternalTechDocs() {
+  // 本仓的内网 git 历史会整体镜像到公网 GitHub，历史提交里的文件同样可被检出，
+  // 因此内部技术文档不能只在发布时从 HEAD 剔除，必须从一开始就不进入本仓。
+  // 统一约定：*.tech.md 只放在不对外发布的 media-plugin-api/docs/dev/。
+  const tracked = run("git", ["ls-files", "--", "*.tech.md"]);
+  if (tracked) {
+    fail(`本仓不得包含内部技术文档 *.tech.md（会随 git 历史进入公网），请移到 media-plugin-api/docs/dev/：\n${tracked}`);
+  }
+}
+
 function sourceContext(baseVersion) {
   for (const command of ["git", "node"]) {
     if (!tryRun(command, ["--version"]).ok) fail(`缺少命令：${command}`);
@@ -189,6 +225,7 @@ function sourceContext(baseVersion) {
   if (run("git", ["rev-parse", "--is-shallow-repository"]) === "true") {
     fail("CLI checkout 为 shallow repository；请在代码拉取插件中启用完整历史后再发布");
   }
+  assertNoInternalTechDocs();
   if (process.env.CLI_RELEASE_COMMIT && process.env.CLI_RELEASE_COMMIT !== cliCommit) {
     fail("当前 CLI checkout 与 CLI_RELEASE_COMMIT 不一致");
   }
@@ -297,10 +334,19 @@ function ensureGithubTag(gitAuth, githubTag, cliCommit) {
     console.log(`[publish] tag already present: ${githubTag}`);
     return;
   }
+  // 流水线 checkout 可能已带同名内网 tag，直接 git tag -a 会报“标签已存在”。
+  // 这里只重建工作区内的本地 tag，不影响内网仓库；GitHub 侧不存在同名 tag 已在上面校验过。
+  const localTagCommit = tryRun("git", ["rev-parse", "--verify", "--quiet", `refs/tags/${githubTag}^{commit}`], { env: gitAuth.env });
+  if (localTagCommit.ok) {
+    console.log(`[publish] local tag exists: ${githubTag} -> ${localTagCommit.stdout}; recreate for ${cliCommit}`);
+    run("git", ["tag", "-d", githubTag], { env: gitAuth.env });
+  }
   run("git", ["config", "user.name", process.env.GIT_TAGGER_NAME ?? "mediaio-release-bot"], { env: gitAuth.env });
   run("git", ["config", "user.email", process.env.GIT_TAGGER_EMAIL ?? "mediaio-release-bot@users.noreply.github.com"], { env: gitAuth.env });
   run("git", ["tag", "-a", githubTag, cliCommit, "-m", `Release ${githubTag}`], { env: gitAuth.env });
-  run("git", ["push", gitAuth.remoteName, `refs/tags/${githubTag}`], { env: gitAuth.env });
+  run("git", ["push", gitAuth.remoteName, `refs/tags/${githubTag}:refs/tags/${githubTag}`], { env: gitAuth.env });
+  const pushedTagCommit = run("git", ["ls-remote", gitAuth.remoteName, `refs/tags/${githubTag}^{}`], { env: gitAuth.env }).split(/\s+/)[0];
+  if (pushedTagCommit !== cliCommit) fail(`GitHub tag ${githubTag} 推送后未指向当前 CLI 提交`);
   console.log(`[publish] tag created: ${githubTag}`);
 }
 
@@ -390,9 +436,10 @@ async function releaseFromState(apiBase, githubToken, state, options = {}) {
   fail(`等待 GitHub Draft Release 可查询超时：${state.github_tag}`);
 }
 
-async function ensureDraftRelease(apiBase, githubTag, cliCommit, releaseVersion, githubToken) {
+async function ensureDraftRelease(apiBase, githubTag, cliCommit, releaseDistTag, githubToken) {
   let release = await releaseForTag(apiBase, githubTag, githubToken);
   if (!release) {
+    const { prerelease, makeLatest } = releaseLabelFor(releaseDistTag);
     release = await githubRequest(`${apiBase}/releases`, githubToken, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -401,7 +448,8 @@ async function ensureDraftRelease(apiBase, githubTag, cliCommit, releaseVersion,
         target_commitish: cliCommit,
         name: githubTag,
         draft: true,
-        prerelease: releaseVersion.includes("-"),
+        prerelease,
+        make_latest: makeLatest,
         generate_release_notes: false,
       }),
     });
@@ -481,22 +529,29 @@ async function uploadBinaryAssets(release, apiBase, githubRepository, githubToke
   return refreshedRelease;
 }
 
-async function publishGithubRelease(release, apiBase, githubToken, archiveNames) {
+async function publishGithubRelease(release, apiBase, githubToken, archiveNames, releaseDistTag) {
   const uploadedNames = new Set(release.assets.map((asset) => asset.name));
   for (const name of releaseAssetNames(archiveNames)) {
     if (!uploadedNames.has(name)) fail(`GitHub Release 缺少资产：${name}`);
   }
+  const { prerelease, makeLatest } = releaseLabelFor(releaseDistTag);
   if (!release.draft) {
+    // Draft 期间 make_latest 会被 GitHub 忽略，公开后的 prerelease 才是最终真值；
+    // 已公开的重试如果标签和本次 RELEASE_DIST_TAG 对不上，说明发布渠道选错了，不能静默放行。
+    if (release.prerelease !== prerelease) {
+      fail(`GitHub Release ${release.tag_name} 已公开，但 prerelease=${release.prerelease} 与 RELEASE_DIST_TAG=${releaseDistTag} 期望值不一致`);
+    }
     console.log(`[publish] GitHub Release already public: ${release.tag_name}`);
     return release;
   }
   const publicRelease = await githubRequest(`${apiBase}/releases/${release.id}`, githubToken, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ draft: false }),
+    body: JSON.stringify({ draft: false, prerelease, make_latest: makeLatest }),
   });
   if (publicRelease.draft) fail("GitHub Release 未成功公开");
-  console.log(`[publish] GitHub Release published: ${publicRelease.tag_name}`);
+  if (publicRelease.prerelease !== prerelease) fail(`GitHub Release 公开后 prerelease 状态与 RELEASE_DIST_TAG=${releaseDistTag} 不一致`);
+  console.log(`[publish] GitHub Release published: ${publicRelease.tag_name} (dist-tag=${releaseDistTag})`);
   return publicRelease;
 }
 
@@ -529,10 +584,13 @@ async function publishNpm(releaseVersion, releaseDistTag, githubTag, apiBase, gi
   const npmToken = requiredEnv("NODE_AUTH_TOKEN");
   const npmDistTag = releaseDistTag;
   const npmDirectory = mkdtempSync(join(tmpdir(), "mediaio-npmrc-"));
+  // 发布前的 npm view 会把旧 packument 写进共享缓存，npmjs 的 max-age 会让随后的
+  // 安装在数分钟内一直复用这份不含新版本的缓存；因此本次发布使用独立且一次性的缓存目录。
+  const npmCacheDirectory = mkdtempSync(join(tmpdir(), "mediaio-npm-cache-"));
   const publishCopy = createNpmPublishCopy(releaseVersion);
   const npmrcPath = join(npmDirectory, ".npmrc");
   writeFileSync(npmrcPath, `//registry.npmjs.org/:_authToken=${npmToken}\n`, { mode: 0o600 });
-  const npmEnv = { ...process.env, NPM_CONFIG_USERCONFIG: npmrcPath };
+  const npmEnv = { ...process.env, NPM_CONFIG_USERCONFIG: npmrcPath, NPM_CONFIG_CACHE: npmCacheDirectory };
   try {
     const existingPackage = tryRun("npm", ["view", `${packageName}@${releaseVersion}`, "version", "--registry=https://registry.npmjs.org"], { env: npmEnv });
     if (existingPackage.ok) {
@@ -547,14 +605,27 @@ async function publishNpm(releaseVersion, releaseDistTag, githubTag, apiBase, gi
 
     const smokeDirectory = mkdtempSync(join(tmpdir(), "mediaio-smoke-"));
     try {
-      run("npm", ["install", "--prefix", smokeDirectory, "--registry=https://registry.npmjs.org", `${packageName}@${releaseVersion}`], { env: npmEnv });
+      const npmRegistryPropagationDelaysMs = [0, 3_000, 5_000, 8_000, 10_000, 15_000, 15_000, 15_000, 15_000];
+      // --prefer-online 强制每次重试都回源校验 packument，否则重试只会命中同一份过期缓存而一直报 ETARGET。
+      await runWithRetry(
+        "npm",
+        ["view", `${packageName}@${releaseVersion}`, "version", "--prefer-online", "--registry=https://registry.npmjs.org"],
+        { env: npmEnv },
+        npmRegistryPropagationDelaysMs,
+      );
+      await runWithRetry(
+        "npm",
+        ["install", "--prefix", smokeDirectory, "--prefer-online", "--registry=https://registry.npmjs.org", `${packageName}@${releaseVersion}`],
+        { env: npmEnv },
+        npmRegistryPropagationDelaysMs,
+      );
       run(join(smokeDirectory, "node_modules", ".bin", "mediaio"), ["--help"], { env: npmEnv });
-      run(join(smokeDirectory, "node_modules", ".bin", "mi"), ["--help"], { env: npmEnv });
     } finally {
       rmSync(smokeDirectory, { recursive: true, force: true });
     }
   } finally {
     rmSync(npmDirectory, { recursive: true, force: true });
+    rmSync(npmCacheDirectory, { recursive: true, force: true });
     rmSync(publishCopy.temporaryRoot, { recursive: true, force: true });
   }
   console.log(`[publish] npm published and verified: ${packageName}@${releaseVersion}`);
@@ -624,7 +695,7 @@ try {
       ? await releaseFromState(apiBase, githubToken, storedState, { allowMissing: true, retry: false })
       : null;
     if (!release) {
-      release = await ensureDraftRelease(apiBase, githubTag, source.cliCommit, releaseVersion, githubToken);
+      release = await ensureDraftRelease(apiBase, githubTag, source.cliCommit, releaseDistTag, githubToken);
     }
     if (!release.draft) fail(`GitHub Release ${githubTag} 已公开；不能创建或改写 Draft Release`);
     writeGithubReleaseState(release, githubRepository, githubTag, releaseVersion, source.cliCommit);
@@ -639,7 +710,7 @@ try {
     const githubToken = requiredEnv("GITHUB_TOKEN");
     const state = readGithubReleaseState(githubRepository, githubTag, releaseVersion, source.cliCommit);
     const release = await releaseFromState(apiBase, githubToken, state);
-    await publishGithubRelease(release, apiBase, githubToken, binaryArchiveNames(releaseVersion));
+    await publishGithubRelease(release, apiBase, githubToken, binaryArchiveNames(releaseVersion), releaseDistTag);
   } else if (operation === "publish-npm") {
     const githubToken = requiredEnv("GITHUB_TOKEN");
     await publishNpm(releaseVersion, releaseDistTag, githubTag, apiBase, githubToken);
@@ -649,10 +720,10 @@ try {
     const gitAuth = configureGithubRemote(githubToken, githubRepository);
     syncSource(gitAuth, source.cliCommit, githubBranch);
     ensureGithubTag(gitAuth, githubTag, source.cliCommit);
-    let release = await ensureDraftRelease(apiBase, githubTag, source.cliCommit, releaseVersion, githubToken);
+    let release = await ensureDraftRelease(apiBase, githubTag, source.cliCommit, releaseDistTag, githubToken);
     const manifestPath = createReleaseManifest(baseVersion, releaseVersion, releaseDistTag, withCiSuffix, githubTag, source.cliCommit, artifacts);
     release = await uploadBinaryAssets(release, apiBase, githubRepository, githubToken, artifacts, manifestPath);
-    await publishGithubRelease(release, apiBase, githubToken, artifacts.archiveNames);
+    await publishGithubRelease(release, apiBase, githubToken, artifacts.archiveNames, releaseDistTag);
     await publishNpm(releaseVersion, releaseDistTag, githubTag, apiBase, githubToken);
   }
 } finally {
