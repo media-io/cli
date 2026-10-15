@@ -85,8 +85,8 @@ export function createNpmArchive(sourceDirectory, version, outputDirectory) {
   if (["prepare", "prepack", "postpack"].some(name => Object.hasOwn(sourcePackage.scripts ?? {}, name))) {
     throw new Error("Package build lifecycle hooks require review before safe artifact packing.");
   }
-  if (sourcePackage.name !== packageName || (version !== sourcePackage.version && !version.startsWith(`${sourcePackage.version}-ci.`))) {
-    throw new Error("Npm artifact version must match the CLI source version or its CI suffix.");
+  if (sourcePackage.name !== packageName || (version !== sourcePackage.version && !version.startsWith(`${sourcePackage.version}-dev.`))) {
+    throw new Error("Npm artifact version must match the CLI source version or its -dev.<build> suffix.");
   }
   const work = mkdtempSync(join(tmpdir(), "mediaio-npm-pack-"));
   try {
@@ -153,7 +153,7 @@ export function packagePipelineArtifact(outputDirectory, sourceDirectory = packa
     const packed = createNpmArchive(source, version, work);
     const sourceCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: source, encoding: "utf8" }).trim();
     const baseVersion = JSON.parse(readFileSync(join(source, "package.json"), "utf8")).version;
-    if ((withCiSuffix === "false" && version !== baseVersion) || (withCiSuffix === "true" && version !== `${baseVersion}-ci.${buildNumber}`)) {
+    if ((withCiSuffix === "false" && version !== baseVersion) || (withCiSuffix === "true" && version !== `${baseVersion}-dev.${buildNumber}`)) {
       throw new Error("Release version does not match the selected CLI CI suffix policy.");
     }
     const metadata = {
