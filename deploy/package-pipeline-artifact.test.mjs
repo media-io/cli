@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,7 +9,7 @@ import test from "node:test";
 import { createNpmArchive, packagePipelineArtifact, verifyNpmArchive } from "./package-pipeline-artifact.mjs";
 
 function withPackage(run) {
-  const root = mkdtempSync(join(tmpdir(), "mediaio-npm-artifact-test-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "mediaio-npm-artifact-test-")));
   const directory = join(root, "package");
   mkdirSync(join(directory, "bin"), { recursive: true });
   writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "@mediaio/cli", version: "0.5.1", scripts: { postinstall: "exit 96" } }));
@@ -66,6 +66,39 @@ test("CLI/BIN清单保留旧字段且npm依赖GitHubRelease，不归档BIN源码
     assert.equal(members.length, 11);
     assert.ok(!members.some(name => name.includes("main.go")));
     assert.throws(() => readFileSync(join(output, "main.go")), /ENOENT/);
+    mkdirSync(join(directory, "deploy"));
+    cpSync(new URL("./package-pipeline-artifact.mjs", import.meta.url), join(directory, "deploy/package-pipeline-artifact.mjs"));
+    const workspace = join(root, "pipeline workspace");
+    mkdirSync(workspace);
+    const pipelineEnv = { ...process.env, WORKSPACE: workspace, MODULE_NAME: "media-plugin-cli-public", ARTIFACT_ARCHIVE_PATH: "ignored" };
+    const pipelineFiles = [];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const pipeline = spawnSync(process.execPath, [join(directory, "deploy/package-pipeline-artifact.mjs"), "--pipeline"], {
+        cwd: root, env: pipelineEnv, encoding: "utf8",
+      });
+      assert.equal(pipeline.status, 0, pipeline.stderr);
+      assert.equal(pipeline.stderr, "");
+      const filename = pipeline.stdout.trim();
+      assert.equal(pipeline.stdout, `${filename}\n`);
+      assert.ok(!filename.startsWith("/") && !filename.includes("..") && !filename.includes("\n"));
+      assert.ok(filename.endsWith("/mediaio-cli-archive_0.5.1_123.tar.gz"));
+      assert.ok(!pipelineFiles.includes(filename));
+      const pipelineManifest = JSON.parse(execFileSync("tar", ["-xOzf", join(workspace, filename), "release-manifest.json"], { encoding: "utf8" }));
+      assert.equal(pipelineManifest.archive_path, "./media-plugin-cli-public/123/plugin-cli-npm");
+      assert.equal(pipelineManifest.assets.length, 6);
+      assert.equal(pipelineManifest.units[1].files[0].name, "mediaio-cli-0.5.1.tgz");
+      pipelineFiles.push(filename);
+    }
+    for (const filename of pipelineFiles) assert.ok(existsSync(join(workspace, filename)));
+    for (const invalidEnv of [
+      { WORKSPACE: "" }, { MODULE_NAME: "../escape" }, { BK_CI_BUILD_NUM: "../escape" }, { WORKSPACE: directory }, { BIN_ARTIFACT_DIR: "" },
+    ]) {
+      const invalid = spawnSync(process.execPath, [join(directory, "deploy/package-pipeline-artifact.mjs"), "--pipeline"], {
+        cwd: root, env: { ...pipelineEnv, ...invalidEnv }, encoding: "utf8",
+      });
+      assert.notEqual(invalid.status, 0);
+      assert.equal(invalid.stdout, "");
+    }
   } finally {
     for (const [name, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[name];

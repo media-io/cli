@@ -222,13 +222,33 @@ export function packagePipelineArtifact(outputDirectory, sourceDirectory = packa
   }
 }
 
+function packageForPipeline() {
+  const { WORKSPACE: workspace, MODULE_NAME: moduleName, BK_CI_BUILD_NUM: buildNumber } = process.env;
+  if (!workspace) throw new Error("WORKSPACE is required for pipeline packaging.");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(moduleName ?? "")) throw new Error("MODULE_NAME must be a safe archive directory name.");
+  if (!/^[0-9]+$/.test(buildNumber ?? "")) throw new Error("BK_CI_BUILD_NUM must be numeric.");
+  const root = realpathSync(workspace);
+  const source = realpathSync(packageRoot);
+  const prefix = join(root, `cli-npm-archive-${buildNumber}.`);
+  if (prefix === source || prefix.startsWith(`${source}${sep}`) || source.startsWith(`${prefix}${sep}`)) {
+    throw new Error("Artifact output must be outside the source checkout.");
+  }
+  const output = mkdtempSync(prefix);
+  process.env.ARTIFACT_ARCHIVE_PATH = `./${moduleName}/${buildNumber}/plugin-cli-npm`;
+  return relative(root, packagePipelineArtifact(output).archiveFile);
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)) {
   try {
-    if (process.argv.length !== 3) throw new Error("Usage: node deploy/package-pipeline-artifact.mjs <output-directory>");
-    const result = await packagePipelineArtifact(process.argv[2]);
-    console.log(`[artifact] file: ${result.file}`);
-    console.log(`[artifact] archive file: ${result.archiveFile}`);
-    console.log(`[artifact] sha256: ${result.sha256}`);
+    if (process.argv.length !== 3) throw new Error("Usage: node deploy/package-pipeline-artifact.mjs <output-directory|--pipeline>");
+    if (process.argv[2] === "--pipeline") {
+      console.log(packageForPipeline());
+    } else {
+      const result = await packagePipelineArtifact(process.argv[2]);
+      console.log(`[artifact] file: ${result.file}`);
+      console.log(`[artifact] archive file: ${result.archiveFile}`);
+      console.log(`[artifact] sha256: ${result.sha256}`);
+    }
   } catch (error) {
     console.error(`[artifact] ${error.message}`);
     process.exitCode = 1;
