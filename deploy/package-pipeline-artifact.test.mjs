@@ -5,8 +5,26 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 
 import { createNpmArchive, packagePipelineArtifact, verifyNpmArchive } from "./package-pipeline-artifact.mjs";
+
+test("发布版本校验使用dev后缀并保留渠道与正式版本规则", () => {
+  const source = readFileSync(new URL("./publish-release.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("function fail(message)");
+  const end = source.indexOf("// GitHub Release 页面的", start);
+  assert.ok(start >= 0 && end > start);
+  const selection = runInNewContext(`${source.slice(start, end)}\nassertReleaseSelection;`);
+  for (const channel of ["next", "latest"]) {
+    selection("0.5.1", "0.5.1-dev.160", channel, true);
+    selection("0.5.1", "0.5.1", channel, false);
+    for (const version of ["0.5.1-ci.160", "0.5.1-dev.0", "0.5.1-dev.0160", "0.5.0-dev.160", "0.5.1"]) {
+      assert.throws(() => selection("0.5.1", version, channel, true), /RELEASE_VERSION/);
+    }
+    assert.throws(() => selection("0.5.1", "0.5.1-dev.160", channel, false), /RELEASE_VERSION/);
+  }
+  assert.throws(() => selection("0.5.1", "0.5.1-dev.160", "unknown", true), /RELEASE_DIST_TAG/);
+});
 
 function withPackage(run) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "mediaio-npm-artifact-test-")));
@@ -90,16 +108,18 @@ test("CLI npm独立归档不读取BIN，不关联GitHubRelease且保留真实npm
     }
     for (const filename of pipelineFiles) assert.ok(existsSync(join(workspace, filename)));
     const ci = spawnSync(process.execPath, [join(directory, "deploy/package-pipeline-artifact.mjs"), "--pipeline"], {
-      cwd: root, env: { ...pipelineEnv, RELEASE_VERSION: "0.5.1-ci.160", RELEASE_WITH_CI_SUFFIX: "true", BIN_ARTIFACT_DIR: binaryDirectory }, encoding: "utf8",
+      cwd: root, env: { ...pipelineEnv, RELEASE_VERSION: "0.5.1-dev.160", RELEASE_WITH_CI_SUFFIX: "true", BIN_ARTIFACT_DIR: binaryDirectory }, encoding: "utf8",
     });
     assert.equal(ci.status, 0, ci.stderr);
-    assert.ok(ci.stdout.trim().endsWith("/mediaio-cli-archive_0.5.1-ci.160_160.tar.gz"));
+    assert.ok(ci.stdout.trim().endsWith("/mediaio-cli-archive_0.5.1-dev.160_160.tar.gz"));
     const ciManifest = JSON.parse(execFileSync("tar", ["-xOzf", join(workspace, ci.stdout.trim()), "release-manifest.json"], { encoding: "utf8" }));
-    assert.equal(ciManifest.release_version, "0.5.1-ci.160");
+    assert.equal(ciManifest.release_version, "0.5.1-dev.160");
     assert.equal(ciManifest.release_with_ci_suffix, true);
     assert.deepEqual(ciManifest.units[0].depends_on, []);
     for (const invalidEnv of [
-      { WORKSPACE: "" }, { MODULE_NAME: "../escape" }, { BK_CI_BUILD_NUM: "../escape" }, { WORKSPACE: directory }, { RELEASE_VERSION: "0.5.1-ci.150", RELEASE_WITH_CI_SUFFIX: "true" },
+      { WORKSPACE: "" }, { MODULE_NAME: "../escape" }, { BK_CI_BUILD_NUM: "../escape" }, { WORKSPACE: directory },
+      { RELEASE_VERSION: "0.5.1-dev.150", RELEASE_WITH_CI_SUFFIX: "true" },
+      { RELEASE_VERSION: "0.5.1-ci.160", RELEASE_WITH_CI_SUFFIX: "true" },
     ]) {
       const invalid = spawnSync(process.execPath, [join(directory, "deploy/package-pipeline-artifact.mjs"), "--pipeline"], {
         cwd: root, env: { ...pipelineEnv, ...invalidEnv }, encoding: "utf8",
@@ -138,10 +158,11 @@ test("真实npm pack离线生成CI版本、不执行生命周期且不改源码"
   const output = join(root, "output");
   mkdirSync(output);
   const original = readFileSync(join(directory, "package.json"), "utf8");
-  const result = createNpmArchive(directory, "0.5.1-ci.123", output);
-  assert.equal(result.filename, "mediaio-cli-0.5.1-ci.123.tgz");
+  const result = createNpmArchive(directory, "0.5.1-dev.123", output);
+  assert.equal(result.filename, "mediaio-cli-0.5.1-dev.123.tgz");
   assert.ok(result.files.includes("package/bin/mediaio.js"));
   assert.equal(readFileSync(join(directory, "package.json"), "utf8"), original);
+  assert.throws(() => createNpmArchive(directory, "0.5.1-ci.123", output), /version/);
   assert.throws(() => createNpmArchive(directory, "9.0.0", output), /version/);
   writeFileSync(join(directory, "bin/untracked.js"), "fixture");
   assert.throws(() => createNpmArchive(directory, "0.5.1", output), /Untracked/);
