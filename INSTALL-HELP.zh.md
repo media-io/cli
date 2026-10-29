@@ -116,14 +116,27 @@ npm install -g @mediaio/cli@latest
 
 安装方式二选一（**不要同时装插件和 skills**，插件已包含 skills）：
 
-- 插件（推荐）：从 <https://github.com/media-io/plugin> 安装 Mediaio 插件。
-- Skills：`npx skills add media-io/plugin -g`（Codex 可加 `--agent codex`）。
+- CLI 插件（Codex）：从 <https://github.com/media-io/plugin-cli> 安装 **Media.io CLI**，市场名 `wondershare-media-io-cli`，插件名 `media-io-cli`。
+- 独立 Skills（Claude Code / Cursor，或未安装插件的 Codex）：`npx skills add media-io/skills -g`（Codex 可加 `--agent codex`）。
+
+Codex 安装命令：
+
+```bash
+codex plugin marketplace add media-io/plugin-cli
+codex plugin marketplace upgrade wondershare-media-io-cli
+codex plugin add media-io-cli@wondershare-media-io-cli
+```
+
+Git 市场不可用时，setup 脚本会使用 personal 市场兜底。
+MCP 插件单独来自 <https://github.com/media-io/plugin-mcp>，市场名 `wondershare-media-io`，插件名 `media-io`。
+CLI 的安装、升级与卸载不能移除 MCP。旧 CLI 用户先重新安装新 CLI 插件；不自动清理旧 `media-io`，因为这个名称现在属于 MCP。
+安装完成后，`mediaio upgrade` 更新 CLI 二进制及所选宿主的 CLI 插件或独立 Skills，不升级 MCP 插件。
 
 常见问题：
 
 - **`npx skills add ...` 失败**：多为缺 `git`。先 `git --version` 确认，Windows 用 <https://git-scm.com>
   安装，macOS 用 `xcode-select --install` 或 `brew install git`，然后重试。
-- **解包错误 / 网络超时**：清理后重试 `npx --yes skills add media-io/plugin -g`；确认能访问 `github.com`。
+- **解包错误 / 网络超时**：清理后重试 `npx --yes skills add media-io/skills -g`；确认能访问 `github.com`。
 - **装完技能不生效**：Skills 会装到客户端技能目录（如 `~/.codex/skills/`）。**新建一个任务或重启
   Codex / 客户端** 让它重新加载技能。
 

@@ -12,9 +12,9 @@ $script:ScriptVersion = "0.1.5"
 
 $MediaIoPackageName = if ($env:MEDIAIO_NPM_PACKAGE) { $env:MEDIAIO_NPM_PACKAGE } else { "@mediaio/cli" }
 $MediaIoInstallDir = if ($env:MEDIAIO_INSTALL_DIR) { $env:MEDIAIO_INSTALL_DIR } else { Join-Path $HOME ".local\bin" }
-$MediaIoClaudePluginId = if ($env:MEDIAIO_CLAUDE_PLUGIN_ID) { $env:MEDIAIO_CLAUDE_PLUGIN_ID } else { "media-io@media-io" }
-$MediaIoCodexPluginName = if ($env:MEDIAIO_CODEX_PLUGIN_NAME) { $env:MEDIAIO_CODEX_PLUGIN_NAME } else { "media-io" }
-$MediaIoCodexMarketplaceName = if ($env:MEDIAIO_CODEX_MARKETPLACE_NAME) { $env:MEDIAIO_CODEX_MARKETPLACE_NAME } else { "media-io" }
+$MediaIoClaudePluginId = if ($env:MEDIAIO_CLAUDE_PLUGIN_ID) { $env:MEDIAIO_CLAUDE_PLUGIN_ID } else { "media-io-cli@wondershare-media-io-cli" }
+$MediaIoCodexPluginName = if ($env:MEDIAIO_CODEX_PLUGIN_NAME) { $env:MEDIAIO_CODEX_PLUGIN_NAME } else { "media-io-cli" }
+$MediaIoCodexMarketplaceName = if ($env:MEDIAIO_CODEX_MARKETPLACE_NAME) { $env:MEDIAIO_CODEX_MARKETPLACE_NAME } else { "wondershare-media-io-cli" }
 
 function Write-Step {
   param([Parameter(Mandatory = $true)][string]$Label)
@@ -284,14 +284,14 @@ function Get-CodexPluginCacheRoots {
 function Get-CodexPluginCacheNamespaceRoots {
   $cacheRoot = Join-Path $env:USERPROFILE ".codex\plugins\cache"
   return @(
-    (Join-Path $cacheRoot "media-io")
+    (Join-Path $cacheRoot $MediaIoCodexMarketplaceName)
   )
 }
 
 function Get-CodexMarketplaceRoots {
   $roots = New-Object System.Collections.Generic.List[string]
   $tmpMarketplaceRoot = Join-Path $env:USERPROFILE ".codex\.tmp\marketplaces"
-  foreach ($marketplace in @($MediaIoCodexMarketplaceName, "media-io")) {
+  foreach ($marketplace in @($MediaIoCodexMarketplaceName)) {
     if ([string]::IsNullOrWhiteSpace($marketplace)) { continue }
     $roots.Add((Join-Path $tmpMarketplaceRoot $marketplace))
   }
@@ -305,11 +305,11 @@ function Get-CodexMarketplaceRoots {
 function Get-ClaudePluginCacheRoots {
   $roots = New-Object System.Collections.Generic.List[string]
   $cacheRoot = Join-Path $env:USERPROFILE ".claude\plugins\cache"
-  $roots.Add((Join-Path $cacheRoot "media-io\media-io"))
+  $roots.Add((Join-Path $cacheRoot "wondershare-media-io-cli\media-io-cli"))
 
   if (Test-Path $cacheRoot) {
     foreach ($candidate in Get-ChildItem -LiteralPath $cacheRoot -Directory -ErrorAction SilentlyContinue) {
-      $roots.Add((Join-Path $candidate.FullName "media-io"))
+      $roots.Add((Join-Path $candidate.FullName "media-io-cli"))
     }
   }
 
@@ -322,7 +322,7 @@ function Get-ClaudePluginCacheRoots {
 function Get-ClaudePluginCacheNamespaceRoots {
   $cacheRoot = Join-Path $env:USERPROFILE ".claude\plugins\cache"
   return @(
-    (Join-Path $cacheRoot "media-io")
+    (Join-Path $cacheRoot "wondershare-media-io-cli")
   )
 }
 
@@ -338,7 +338,7 @@ function Remove-CodexPluginCaches {
 
 function Remove-CodexMarketplaces {
   if (Test-CommandAvailable "codex") {
-    foreach ($marketplace in @($MediaIoCodexMarketplaceName, "media-io") | Select-Object -Unique) {
+    foreach ($marketplace in @($MediaIoCodexMarketplaceName) | Select-Object -Unique) {
       if ([string]::IsNullOrWhiteSpace($marketplace)) { continue }
       try {
         $global:LASTEXITCODE = 0
@@ -454,7 +454,7 @@ function Remove-CodexPlugin {
     Write-Host "  OK: removed $MediaIoCodexPluginName from personal marketplace file" -ForegroundColor Green
   }
 
-  [void](Remove-PathIfPresent -Path (Join-Path $env:USERPROFILE "plugins\media-io"))
+  [void](Remove-PathIfPresent -Path (Join-Path $env:USERPROFILE "plugins\media-io-cli"))
   Remove-CodexMarketplaces
   Remove-CodexPluginCaches
 
@@ -504,17 +504,19 @@ function Get-MediaIoSkillNames {
     return @(Get-DefaultMediaIoSkillNames)
   }
 
-  $skillSource = Join-Path $PSScriptRoot "skills"
-  if (-not (Test-Path $skillSource)) {
-    return @(Get-DefaultMediaIoSkillNames)
+  foreach ($skillSource in @(
+    (Join-Path $PSScriptRoot "skills"),
+    (Join-Path $PSScriptRoot "..\media-plugin-main\plugin-cli-main\skills"),
+    (Join-Path $env:USERPROFILE "plugins\media-io-cli\skills")
+  )) {
+    if (-not (Test-Path $skillSource)) { continue }
+    $names = @(
+      Get-ChildItem -Path $skillSource -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName "SKILL.md") } |
+        ForEach-Object { $_.Name }
+    )
+    if ($names.Count -gt 0) { return $names }
   }
-
-  $names = @(
-    Get-ChildItem -Path $skillSource -Directory -ErrorAction SilentlyContinue |
-      Where-Object { Test-Path (Join-Path $_.FullName "SKILL.md") } |
-      ForEach-Object { $_.Name }
-  )
-  if ($names.Count -gt 0) { return $names }
 
   return @(Get-DefaultMediaIoSkillNames)
 }

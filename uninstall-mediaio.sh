@@ -12,9 +12,9 @@ warnings=
 SCRIPT_VERSION="0.1.5"
 MediaIoPackageName=${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}
 MediaIoInstallDir=${MEDIAIO_INSTALL_DIR:-"$HOME/.local/bin"}
-MediaIoClaudePluginId=${MEDIAIO_CLAUDE_PLUGIN_ID:-media-io@media-io}
-MediaIoCodexPluginName=${MEDIAIO_CODEX_PLUGIN_NAME:-media-io}
-MediaIoCodexMarketplaceName=${MEDIAIO_CODEX_MARKETPLACE_NAME:-media-io}
+MediaIoClaudePluginId=${MEDIAIO_CLAUDE_PLUGIN_ID:-media-io-cli@wondershare-media-io-cli}
+MediaIoCodexPluginName=${MEDIAIO_CODEX_PLUGIN_NAME:-media-io-cli}
+MediaIoCodexMarketplaceName=${MEDIAIO_CODEX_MARKETPLACE_NAME:-wondershare-media-io-cli}
 claude_available=0
 codex_available=0
 
@@ -91,7 +91,7 @@ get_default_mediaio_skill_names() {
 }
 
 get_mediaio_plugin_source_root() {
-  for candidate in "$SCRIPT_ROOT" "$SCRIPT_ROOT/../media-plugin-main" "$SCRIPT_ROOT/../plugins/media-io" "$HOME/.codex/.tmp/marketplaces/$MediaIoCodexMarketplaceName"; do
+  for candidate in "$SCRIPT_ROOT" "$SCRIPT_ROOT/../media-plugin-main/plugin-cli-main" "$SCRIPT_ROOT/../plugins/media-io-cli" "$HOME/.codex/.tmp/marketplaces/$MediaIoCodexMarketplaceName" "$HOME/plugins/media-io-cli"; do
     if [ -f "$candidate/.codex-plugin/plugin.json" ]; then
       printf '%s\n' "$candidate"
       return 0
@@ -105,7 +105,7 @@ get_mediaio_skill_source_root() {
     printf '%s\n' "$MEDIAIO_SKILL_SOURCE"
     return 0
   fi
-  for candidate in "$SCRIPT_ROOT/skills" "$SCRIPT_ROOT/../media-plugin-main/skills" "$SCRIPT_ROOT/../plugins/media-io/skills"; do
+  for candidate in "$SCRIPT_ROOT/skills" "$SCRIPT_ROOT/../media-plugin-main/plugin-cli-main/skills" "$SCRIPT_ROOT/../plugins/media-io-cli/skills" "$HOME/plugins/media-io-cli/skills"; do
     if [ -d "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0
@@ -218,8 +218,6 @@ get_codex_plugin_cache_roots() {
     "$HOME/.codex/plugins/cache/$marketplace/$MediaIoCodexPluginName" \
     "$HOME/.codex/plugins/cache/$MediaIoCodexMarketplaceName/$MediaIoCodexPluginName/$version" \
     "$HOME/.codex/plugins/cache/$MediaIoCodexMarketplaceName/$MediaIoCodexPluginName" \
-    "$HOME/.codex/plugins/cache/media-io/$MediaIoCodexPluginName/$version" \
-    "$HOME/.codex/plugins/cache/media-io/$MediaIoCodexPluginName" \
     "$HOME/.codex/plugins/cache/personal/$MediaIoCodexPluginName/$version" \
     "$HOME/.codex/plugins/cache/personal/$MediaIoCodexPluginName"
   do
@@ -236,32 +234,31 @@ get_codex_plugin_cache_roots() {
 
 get_codex_marketplace_roots() {
   tmp_marketplace_root=$HOME/.codex/.tmp/marketplaces
-  for marketplace in "$MediaIoCodexMarketplaceName" media-io; do
+  for marketplace in "$MediaIoCodexMarketplaceName"; do
     [ -n "$marketplace" ] && printf '%s\n' "$tmp_marketplace_root/$marketplace"
   done
 }
 
 get_claude_plugin_cache_roots() {
   version=$(get_mediaio_plugin_version 2>/dev/null || true)
-  for cache_root in "$HOME/.claude/plugins/cache/media-io/media-io/$version" "$HOME/.claude/plugins/cache/media-io/media-io"; do
+  for cache_root in "$HOME/.claude/plugins/cache/wondershare-media-io-cli/media-io-cli/$version" "$HOME/.claude/plugins/cache/wondershare-media-io-cli/media-io-cli"; do
     [ -n "$cache_root" ] && printf '%s\n' "$cache_root"
   done
 
   if [ -d "$HOME/.claude/plugins/cache" ]; then
     find "$HOME/.claude/plugins/cache" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while IFS= read -r dir; do
-      [ -n "$dir" ] && printf '%s\n' "$dir/media-io"
+      [ -n "$dir" ] && printf '%s\n' "$dir/media-io-cli"
     done
   fi
 }
 
 get_codex_plugin_cache_namespace_roots() {
   printf '%s\n' "$HOME/.codex/plugins/cache/$MediaIoCodexMarketplaceName"
-  printf '%s\n' "$HOME/.codex/plugins/cache/media-io"
   printf '%s\n' "$HOME/.codex/plugins/cache/personal"
 }
 
 get_claude_plugin_cache_namespace_roots() {
-  printf '%s\n' "$HOME/.claude/plugins/cache/media-io"
+  printf '%s\n' "$HOME/.claude/plugins/cache/wondershare-media-io-cli"
 }
 
 remove_empty_directory_if_present() {
@@ -288,7 +285,7 @@ remove_codex_plugin_caches() {
 
 remove_codex_marketplaces() {
   if require_command codex; then
-    for marketplace in "$MediaIoCodexMarketplaceName" media-io; do
+    for marketplace in "$MediaIoCodexMarketplaceName"; do
       [ -n "$marketplace" ] || continue
       raw=$(codex plugin marketplace remove "$marketplace" 2>&1) && {
         printf '  OK: codex plugin marketplace remove %s\n' "$marketplace"
@@ -520,14 +517,14 @@ remove_codex_plugin() {
   if remove_personal_marketplace_entry; then
     printf '  OK: removed %s from personal marketplace file\n' "$MediaIoCodexPluginName"
   elif [ -f "$(get_personal_marketplace_path)" ]; then
-    add_warning "No media-io entry was found in the personal marketplace file."
+    add_warning "No $MediaIoCodexPluginName entry was found in the personal marketplace file."
   else
     add_warning "Personal marketplace file does not exist."
   fi
 
   remove_codex_plugin_caches
   remove_codex_marketplaces
-  remove_path_if_present "$HOME/plugins/media-io" >/dev/null || true
+  remove_path_if_present "$HOME/plugins/media-io-cli" >/dev/null || true
   [ "$removed" -eq 0 ] || return 0
 }
 
