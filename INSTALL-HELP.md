@@ -127,14 +127,24 @@ confirm the user's system is in range; `win32` maps to `windows`.
 Choose one install method (**do not install both the plugin and skills** — the plugin already bundles the
 skills):
 
-- Plugin (recommended): install the Mediaio plugin from <https://github.com/media-io/plugin>.
-- Skills: `npx skills add media-io/plugin -g` (on Codex you can add `--agent codex`).
+- CLI plugin (Codex): install **Media.io CLI** from <https://github.com/media-io/plugin-cli>. The marketplace is `wondershare-media-io-cli`; the plugin is `media-io-cli`.
+- Direct Skills (Claude Code / Cursor, or Codex without the plugin): `npx skills add media-io/skills -g` (on Codex you can add `--agent codex`).
+
+For Codex, run `codex plugin marketplace add media-io/plugin-cli`, then
+`codex plugin marketplace upgrade wondershare-media-io-cli` and
+`codex plugin add media-io-cli@wondershare-media-io-cli`.
+The setup scripts use a personal marketplace fallback if the Git marketplace is unavailable.
+
+The separate MCP plugin is `media-io` in marketplace `wondershare-media-io`, from
+<https://github.com/media-io/plugin-mcp>. Installing, upgrading, or uninstalling the CLI companion must not remove it.
+For an old CLI installation named `media-io`, reinstall the new CLI companion first; automatic legacy cleanup is not performed because that name now belongs to MCP.
+After installation, `mediaio upgrade` updates the CLI binary and the selected host's CLI companion or direct Skills; it does not upgrade the MCP plugin.
 
 Common problems:
 
 - **`npx skills add ...` fails**: usually missing `git`. Confirm with `git --version`; on Windows install
   from <https://git-scm.com>, on macOS use `xcode-select --install` or `brew install git`, then retry.
-- **Unpack error / network timeout**: clean and retry `npx --yes skills add media-io/plugin -g`; confirm
+- **Unpack error / network timeout**: clean and retry `npx --yes skills add media-io/skills -g`; confirm
   access to `github.com`.
 - **Skills don't take effect after install**: skills are installed into the client's skills directory
   (e.g. `~/.codex/skills/`). **Start a new task or restart Codex / the client** so it reloads the skills.

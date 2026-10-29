@@ -41,10 +41,10 @@ $script:ClaudePluginReady = $false
 $script:CodexPluginReady = $false
 
 $MediaIoPackageName = if ($env:MEDIAIO_NPM_PACKAGE) { $env:MEDIAIO_NPM_PACKAGE } else { "@mediaio/cli" }
-$MediaIoMarketplaceSource = if ($env:MEDIAIO_MARKETPLACE_SOURCE) { $env:MEDIAIO_MARKETPLACE_SOURCE } else { "media-io/plugin" }
-$MediaIoClaudePluginId = if ($env:MEDIAIO_CLAUDE_PLUGIN_ID) { $env:MEDIAIO_CLAUDE_PLUGIN_ID } else { "media-io@media-io" }
-$MediaIoCodexPluginName = if ($env:MEDIAIO_CODEX_PLUGIN_NAME) { $env:MEDIAIO_CODEX_PLUGIN_NAME } else { "media-io" }
-$MediaIoCodexMarketplaceName = if ($env:MEDIAIO_CODEX_MARKETPLACE_NAME) { $env:MEDIAIO_CODEX_MARKETPLACE_NAME } else { "media-io" }
+$MediaIoMarketplaceSource = if ($env:MEDIAIO_MARKETPLACE_SOURCE) { $env:MEDIAIO_MARKETPLACE_SOURCE } else { "media-io/plugin-cli" }
+$MediaIoClaudePluginId = if ($env:MEDIAIO_CLAUDE_PLUGIN_ID) { $env:MEDIAIO_CLAUDE_PLUGIN_ID } else { "media-io-cli@wondershare-media-io-cli" }
+$MediaIoCodexPluginName = if ($env:MEDIAIO_CODEX_PLUGIN_NAME) { $env:MEDIAIO_CODEX_PLUGIN_NAME } else { "media-io-cli" }
+$MediaIoCodexMarketplaceName = if ($env:MEDIAIO_CODEX_MARKETPLACE_NAME) { $env:MEDIAIO_CODEX_MARKETPLACE_NAME } else { "wondershare-media-io-cli" }
 $MediaIoInstallDir = if ($env:MEDIAIO_INSTALL_DIR) { $env:MEDIAIO_INSTALL_DIR } else { Join-Path $HOME ".local\bin" }
 $MediaIoNpmRegistry = if ($env:MEDIAIO_NPM_REGISTRY) { $env:MEDIAIO_NPM_REGISTRY.TrimEnd('/') } else { "https://registry.npmjs.org" }
 $MediaIoReleaseRepo = if ($env:MEDIAIO_RELEASE_REPO) { $env:MEDIAIO_RELEASE_REPO } else { "media-io/cli" }
@@ -53,7 +53,7 @@ $MediaIoReleaseBaseUrl = if ($env:MEDIAIO_RELEASE_BASE_URL) { $env:MEDIAIO_RELEA
 $MediaIoVersion = if ($env:MEDIAIO_VERSION) { $env:MEDIAIO_VERSION } else { "latest" }
 $MediaIoSkillRepo = if ($env:MEDIAIO_SKILL_REPO) { $env:MEDIAIO_SKILL_REPO } else { "media-io/skills" }
 $MediaIoSkillSource = if ($env:MEDIAIO_SKILL_SOURCE) { $env:MEDIAIO_SKILL_SOURCE } else { "" }
-$MediaIoPluginArchiveUrl = if ($env:MEDIAIO_PLUGIN_ARCHIVE_URL) { $env:MEDIAIO_PLUGIN_ARCHIVE_URL } else { "https://github.com/media-io/plugin/archive/refs/heads/main.zip" }
+$MediaIoPluginArchiveUrl = if ($env:MEDIAIO_PLUGIN_ARCHIVE_URL) { $env:MEDIAIO_PLUGIN_ARCHIVE_URL } else { "https://github.com/media-io/plugin-cli/archive/refs/heads/main.zip" }
 
 function Write-Step {
   param([Parameter(Mandatory = $true)][string]$Label)
@@ -772,6 +772,7 @@ function Get-MediaIoSkillSourceCandidates {
   }
   if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
     $candidates.Add((Join-Path $PSScriptRoot "skills"))
+    $candidates.Add((Join-Path $PSScriptRoot "..\media-plugin-main\plugin-cli-main\skills"))
   }
   $localPluginSkills = Join-Path (Get-LocalMediaIoPluginRoot) "skills"
   $candidates.Add($localPluginSkills)
@@ -820,7 +821,7 @@ function Test-MediaIoSkillSetInBase {
 }
 
 function Test-ClaudePluginProvidedSkillsPresent {
-  $namespaceRoot = Join-Path $HOME ".claude\plugins\cache\media-io\media-io"
+  $namespaceRoot = Join-Path $HOME ".claude\plugins\cache\wondershare-media-io-cli\media-io-cli"
   if (-not (Test-Path $namespaceRoot)) { return $false }
 
   $candidateRoots = @($namespaceRoot)
@@ -1030,7 +1031,7 @@ function Get-PersonalMarketplacePath {
 }
 
 function Get-LocalMediaIoPluginRoot {
-  return Join-Path $env:USERPROFILE "plugins\media-io"
+  return Join-Path $env:USERPROFILE "plugins\media-io-cli"
 }
 
 function Get-MediaIoPluginSourceCandidates {
@@ -1040,6 +1041,7 @@ function Get-MediaIoPluginSourceCandidates {
   }
   if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
     $candidates.Add($PSScriptRoot)
+    $candidates.Add((Join-Path $PSScriptRoot "..\media-plugin-main\plugin-cli-main"))
   }
   $candidates.Add((Get-CodexMarketplaceCheckoutRoot))
   $candidates.Add((Get-LocalMediaIoPluginRoot))
@@ -1219,7 +1221,7 @@ function Initialize-PersonalMarketplaceFallback {
     name = $MediaIoCodexPluginName
     source = [ordered]@{
       source = "local"
-      path = "./plugins/media-io"
+      path = "./plugins/media-io-cli"
     }
     policy = [ordered]@{
       installation = "AVAILABLE"
