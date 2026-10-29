@@ -27,10 +27,10 @@ failures=
 warnings=
 SCRIPT_VERSION="0.1.13"
 MediaIoPackageName=${MEDIAIO_NPM_PACKAGE:-@mediaio/cli}
-MediaIoMarketplaceSource=${MEDIAIO_MARKETPLACE_SOURCE:-media-io/plugin}
-MediaIoClaudePluginId=${MEDIAIO_CLAUDE_PLUGIN_ID:-media-io@media-io}
-MediaIoCodexPluginName=${MEDIAIO_CODEX_PLUGIN_NAME:-media-io}
-MediaIoCodexMarketplaceName=${MEDIAIO_CODEX_MARKETPLACE_NAME:-media-io}
+MediaIoMarketplaceSource=${MEDIAIO_MARKETPLACE_SOURCE:-media-io/plugin-cli}
+MediaIoClaudePluginId=${MEDIAIO_CLAUDE_PLUGIN_ID:-media-io-cli@wondershare-media-io-cli}
+MediaIoCodexPluginName=${MEDIAIO_CODEX_PLUGIN_NAME:-media-io-cli}
+MediaIoCodexMarketplaceName=${MEDIAIO_CODEX_MARKETPLACE_NAME:-wondershare-media-io-cli}
 MediaIoInstallDir=${MEDIAIO_INSTALL_DIR:-"$HOME/.local/bin"}
 MediaIoNpmRegistry=${MEDIAIO_NPM_REGISTRY:-https://registry.npmjs.org}
 MediaIoReleaseRepo=${MEDIAIO_RELEASE_REPO:-media-io/cli}
@@ -40,7 +40,7 @@ MediaIoVersion=${MEDIAIO_VERSION:-latest}
 MediaIoBinaryUrl=${MEDIAIO_BINARY_URL:-}
 MediaIoChecksumUrl=${MEDIAIO_CHECKSUM_URL:-}
 MediaIoSkillRepo=${MEDIAIO_SKILL_REPO:-media-io/skills}
-MediaIoPluginArchiveUrl=${MEDIAIO_PLUGIN_ARCHIVE_URL:-https://github.com/media-io/plugin/archive/refs/heads/main.zip}
+MediaIoPluginArchiveUrl=${MEDIAIO_PLUGIN_ARCHIVE_URL:-https://github.com/media-io/plugin-cli/archive/refs/heads/main.zip}
 MediaIoNodeInstallRoot=${MEDIAIO_NODE_INSTALL_DIR:-"$HOME/.local/share/mediaio/node"}
 MediaIoNodeCurrentDir=$MediaIoNodeInstallRoot/current
 MediaIoNodeBinDir=$MediaIoNodeCurrentDir/bin
@@ -502,7 +502,7 @@ install_mediaio_cli_from_npm_package() {
 }
 
 get_local_mediaio_plugin_root() {
-  printf '%s\n' "$HOME/plugins/media-io"
+  printf '%s\n' "$HOME/plugins/media-io-cli"
 }
 
 get_default_mediaio_skill_names() {
@@ -514,7 +514,7 @@ get_mediaio_plugin_source_root() {
     printf '%s\n' "$MEDIAIO_PLUGIN_SOURCE"
     return 0
   fi
-  for candidate in "$SCRIPT_ROOT" "$SCRIPT_ROOT/../media-plugin-main" "$SCRIPT_ROOT/../plugins/media-io" "$HOME/.codex/.tmp/marketplaces/$MediaIoCodexMarketplaceName" "$(get_local_mediaio_plugin_root)"; do
+  for candidate in "$SCRIPT_ROOT" "$SCRIPT_ROOT/../media-plugin-main/plugin-cli-main" "$SCRIPT_ROOT/../plugins/media-io-cli" "$HOME/.codex/.tmp/marketplaces/$MediaIoCodexMarketplaceName" "$(get_local_mediaio_plugin_root)"; do
     if [ -f "$candidate/.codex-plugin/plugin.json" ]; then
       printf '%s\n' "$candidate"
       return 0
@@ -528,7 +528,7 @@ get_mediaio_skill_source_root() {
     printf '%s\n' "$MEDIAIO_SKILL_SOURCE"
     return 0
   fi
-  for candidate in "$SCRIPT_ROOT/skills" "$SCRIPT_ROOT/../media-plugin-main/skills" "$SCRIPT_ROOT/../plugins/media-io/skills" "$(get_local_mediaio_plugin_root)/skills"; do
+  for candidate in "$SCRIPT_ROOT/skills" "$SCRIPT_ROOT/../media-plugin-main/plugin-cli-main/skills" "$SCRIPT_ROOT/../plugins/media-io-cli/skills" "$(get_local_mediaio_plugin_root)/skills"; do
     if [ -d "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0
@@ -600,7 +600,7 @@ EOF
 }
 
 test_claude_plugin_provided_skills_present() {
-  namespace_root=$HOME/.claude/plugins/cache/media-io/media-io
+  namespace_root=$HOME/.claude/plugins/cache/wondershare-media-io-cli/media-io-cli
   [ -d "$namespace_root" ] || return 1
   test_mediaio_skill_set_in_base "$namespace_root/skills" && return 0
   find "$namespace_root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort -r | {
@@ -897,10 +897,10 @@ initialize_personal_marketplace_fallback() {
     payload.name = String(payload.name || process.argv[2]).trim() || process.argv[2];
     payload.interface = payload.interface || {};
     payload.interface.displayName = String(payload.interface.displayName || process.argv[3]).trim() || process.argv[3];
-    payload.plugins = Array.isArray(payload.plugins) ? payload.plugins.filter((entry) => entry && entry.name !== "media-io") : [];
+    payload.plugins = Array.isArray(payload.plugins) ? payload.plugins.filter((entry) => entry && entry.name !== process.argv[4]) : [];
     payload.plugins.push({
       name: process.argv[4],
-      source: { source: "local", path: "./plugins/media-io" },
+      source: { source: "local", path: "./plugins/media-io-cli" },
       policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
       category: "Design"
     });
@@ -909,8 +909,7 @@ initialize_personal_marketplace_fallback() {
 
   mkdir -p "$(dirname "$marketplace_path")"
   write_json_no_bom "$marketplace_path" "$payload"
-  # The marketplace entry points at ./plugins/media-io, so a missing plugin root
-  # would leave Codex with a dangling local source.
+  # 本地 marketplace 条目必须与 CLI 插件目录一致。
   initialize_local_mediaio_plugin_root || return 1
   resolved_personal_marketplace_name=$marketplace_name
 }

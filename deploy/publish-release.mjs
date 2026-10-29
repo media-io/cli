@@ -79,10 +79,10 @@ function assertReleaseSelection(baseVersion, releaseVersion, releaseDistTag, wit
     return;
   }
 
-  const prefix = `${baseVersion}-ci.`;
+  const prefix = `${baseVersion}-dev.`;
   const buildNumber = releaseVersion.startsWith(prefix) ? releaseVersion.slice(prefix.length) : "";
   if (!/^[1-9][0-9]*$/.test(buildNumber)) {
-    fail(`启用 CI 后缀时 RELEASE_VERSION 必须为 ${baseVersion}-ci.<正整数>：${releaseVersion}`);
+    fail(`启用 CI 后缀时 RELEASE_VERSION 必须为 ${baseVersion}-dev.<正整数>：${releaseVersion}`);
   }
 }
 
